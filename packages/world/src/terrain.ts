@@ -10,6 +10,7 @@
  * Генерация полностью детерминирована от seed мира.
  */
 import { hash2d } from '../../core/src/rng.ts';
+import { seedFauna } from './fauna.ts';
 import { MAT } from './materials.ts';
 import type { World } from './world.ts';
 
@@ -48,8 +49,34 @@ export function generateTerrain(w: World, opts: TerrainOptions = {}): void {
   w.thermalIdle = true;
 
   growSurface(w, heights, seaLevel, treeCount);
+  growAlgaeBeds(w, heights, seaLevel);
+  seedFauna(w);
 
   g.touchAll();
+}
+
+/** Водоросли на дне водоёмов — основа водной жизни. */
+function growAlgaeBeds(w: World, heights: Int32Array, seaLevel: number): void {
+  const g = w.grid;
+  const rng = w.rng;
+  const W = g.w;
+  const H = g.h;
+
+  for (let x = 0; x < W; x++) {
+    for (let y = Math.max(0, seaLevel - 2); y < H - 1; y++) {
+      const i = y * W + x;
+      if (g.mat[i] !== MAT.WATER) continue;
+      const below = g.mat[(y + 1) * W + x];
+      if (below !== MAT.SAND && below !== MAT.DIRT && below !== MAT.STONE && below !== MAT.GRAVEL) continue;
+      if (!rng.chance(0.6)) break;
+      g.set(x, y, MAT.ALGAE);
+      // Водоросли стелются не в одну клетку, а ковром по дну.
+      if (rng.chance(0.5) && y > 0 && g.mat[(y - 1) * W + x] === MAT.WATER) {
+        g.set(x, y - 1, MAT.ALGAE);
+      }
+      break;
+    }
+  }
 }
 
 /** Поле температур среды: холодная кромка слева, тепло справа. */
@@ -87,14 +114,16 @@ function buildHeights(w: World): Int32Array {
 
   for (let x = 0; x < W; x++) {
     const u = x / W;
-    // Впадина слева: там будет озеро, а на нём — ледяная кромка.
+    // Впадина слева (озеро с ледяной кромкой) и широкая низина справа (море).
     // Внимание: высота здесь — координата Y, поэтому впадина это прибавка.
     const basin = 34 * Math.max(0, 1 - u / 0.34);
+    const sea = 32 * Math.max(0, (u - 0.68) / 0.32);
     const hgt =
       base +
       basin +
-      Math.sin(u * Math.PI * 2 * 0.75 + ph1) * 30 +
-      Math.sin(u * Math.PI * 2 * 1.9 + ph2) * 13 +
+      sea +
+      Math.sin(u * Math.PI * 2 * 0.75 + ph1) * 26 +
+      Math.sin(u * Math.PI * 2 * 1.9 + ph2) * 12 +
       Math.sin(u * Math.PI * 2 * 4.7 + ph3) * 5 +
       Math.sin(u * Math.PI * 2 * 9.3 + ph4) * 2;
     heights[x] = Math.round(hgt);
@@ -144,12 +173,12 @@ function carveCaves(w: World, heights: Int32Array): void {
   const H = g.h;
 
   for (let x = 0; x < W; x++) {
-    const top = heights[x] + 10;
+    const top = heights[x] + 12;
     for (let y = top; y < H - 2; y++) {
       const n1 = valueNoise(x * 0.055, y * 0.085, 31);
       const n2 = valueNoise(x * 0.13, y * 0.19, 57);
       const v = n1 * 0.68 + n2 * 0.32;
-      if (v > 0.63) g.set(x, y, MAT.AIR);
+      if (v > 0.68) g.set(x, y, MAT.AIR);
     }
   }
 }
@@ -312,24 +341,28 @@ function growSurface(w: World, heights: Int32Array, seaLevel: number, treeCount:
     const surface = surfaceY(g, x);
     if (surface < 1) continue;
     const m = g.mat[surface * W + x];
-    if (m !== MAT.DIRT && m !== MAT.SAND) continue;
 
     const cold = w.ambientAt(x, surface) < 0;
     if (cold) {
       // В холодной полосе вместо травы снег.
-      if (m === MAT.DIRT && rng.chance(0.85)) g.set(x, surface, MAT.SNOW);
+      if ((m === MAT.DIRT || m === MAT.MUD) && rng.chance(0.85)) g.set(x, surface, MAT.SNOW);
       continue;
     }
+
+    // Луг засеваем везде, где есть почва: и на земле, и на грязи, и на глине.
+    const soil = m === MAT.DIRT || m === MAT.MUD || m === MAT.CLAY;
     if (m === MAT.SAND) {
-      if (rng.chance(0.08)) g.set(x, surface - 1, MAT.BUSH);
+      if (rng.chance(0.06)) g.set(x, surface - 1, MAT.BUSH);
       continue;
     }
-    if (surface >= seaLevel - 1) continue;
+    if (!soil) continue;
+    if (surface >= seaLevel) continue;
 
     g.set(x, surface, MAT.GRASS);
     const roll = rng.nextFloat();
-    if (roll < 0.05) g.set(x, surface - 1, MAT.FLOWER);
-    else if (roll < 0.09) g.set(x, surface - 1, MAT.BUSH);
+    if (roll < 0.08) g.set(x, surface - 1, MAT.FLOWER);
+    else if (roll < 0.14) g.set(x, surface - 1, MAT.BUSH);
+    else if (roll < 0.17) g.set(x, surface - 1, MAT.MUSHROOM);
   }
 
   // Лес: сразу взрослые деревья, чтобы мир с первого кадра был живым.

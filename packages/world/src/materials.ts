@@ -40,6 +40,8 @@ export const MAT = {
   GLASS: 27,
   BRICK: 28,
   FRUIT: 29,
+  ALGAE: 30,
+  MEAT: 31,
 } as const;
 
 /** Агрегатное состояние — определяет, как клетка двигается. */
@@ -376,6 +378,29 @@ export const MATERIALS: MatDef[] = [
     conductivity: 0.25,
     lightAtten: 14,
   }),
+  def({ id: MAT.ALGAE, key: 'algae', name: 'водоросли', state: ST.SOLID, color: [46, 104, 72] }, {
+    variance: 22,
+    density: 900,
+    conductivity: 0.3,
+    lightAtten: 20,
+    burnTemp: 220,
+    flammable: 0.08,
+    burnInto: MAT.ASH,
+    burnIntoChance: 0.3,
+  }),
+  def({ id: MAT.MEAT, key: 'meat', name: 'падаль', state: ST.POWDER, color: [148, 66, 68] }, {
+    variance: 20,
+    density: 900,
+    conductivity: 0.3,
+    lightAtten: 30,
+    burnTemp: 240,
+    flammable: 0.04,
+    burnInto: MAT.ASH,
+    burnIntoChance: 0.4,
+    // Мясо не лежит вечно: оно истлевает в землю.
+    lifetime: 5400,
+    lifetimeInto: MAT.DIRT,
+  }),
 ];
 
 export const MATERIAL_COUNT = MATERIALS.length;
@@ -394,6 +419,18 @@ export const CONDUCT = new Float32Array(MATERIAL_COUNT);
 export const IS_PLANT = new Uint8Array(MATERIAL_COUNT);
 export const DENSITY = new Float32Array(MATERIAL_COUNT);
 export const MAT_STATE = new Uint8Array(MATERIAL_COUNT);
+export const LIFETIME = new Uint16Array(MATERIAL_COUNT);
+export const FLAMMABLE = new Float32Array(MATERIAL_COUNT);
+export const BURN_TEMP = new Int16Array(MATERIAL_COUNT);
+export const MELT_TEMP = new Int16Array(MATERIAL_COUNT);
+export const MELT_INTO = new Uint8Array(MATERIAL_COUNT);
+export const FREEZE_TEMP = new Int16Array(MATERIAL_COUNT);
+export const FREEZE_INTO = new Uint8Array(MATERIAL_COUNT);
+export const LIFETIME_INTO = new Uint8Array(MATERIAL_COUNT);
+export const MELT_CHANCE = new Float32Array(MATERIAL_COUNT);
+export const FREEZE_CHANCE = new Float32Array(MATERIAL_COUNT);
+export const BURN_INTO_CHANCE = new Float32Array(MATERIAL_COUNT);
+export const DISPERSION = new Uint8Array(MATERIAL_COUNT);
 
 for (const m of MATERIALS) {
   LIGHT_ATTEN[m.id] = m.lightAtten;
@@ -401,6 +438,18 @@ for (const m of MATERIALS) {
   CONDUCT[m.id] = m.conductivity;
   DENSITY[m.id] = m.density;
   MAT_STATE[m.id] = m.state;
+  LIFETIME[m.id] = m.lifetime;
+  FLAMMABLE[m.id] = m.flammable;
+  BURN_TEMP[m.id] = m.burnTemp;
+  MELT_TEMP[m.id] = m.meltTemp;
+  MELT_INTO[m.id] = m.meltInto;
+  FREEZE_TEMP[m.id] = m.freezeTemp;
+  FREEZE_INTO[m.id] = m.freezeInto;
+  LIFETIME_INTO[m.id] = m.lifetimeInto;
+  MELT_CHANCE[m.id] = m.meltChance;
+  FREEZE_CHANCE[m.id] = m.freezeChance;
+  BURN_INTO_CHANCE[m.id] = m.burnIntoChance;
+  DISPERSION[m.id] = m.dispersion;
   IS_PLANT[m.id] =
     m.id === MAT.GRASS ||
     m.id === MAT.LEAVES ||
@@ -408,7 +457,8 @@ for (const m of MATERIALS) {
     m.id === MAT.SEED ||
     m.id === MAT.BUSH ||
     m.id === MAT.FLOWER ||
-    m.id === MAT.MUSHROOM
+    m.id === MAT.MUSHROOM ||
+    m.id === MAT.ALGAE
       ? 1
       : 0;
 }
@@ -495,4 +545,6 @@ export const MAT_GROUP: Record<string, string> = {
   copper: 'металлы',
   glass: 'продукты',
   brick: 'продукты',
+  algae: 'растения',
+  meat: 'органика',
 };

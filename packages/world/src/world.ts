@@ -19,6 +19,7 @@ import {
   hashBytes,
 } from '../../core/src/snapshot.ts';
 import { CHUNK, Grid } from './grid.ts';
+import { Fauna } from './fauna.ts';
 import { MAT, MATERIALS, MATERIAL_COUNT } from './materials.ts';
 import { WEATHER, computeSkyLight, stepWorld } from './sim.ts';
 
@@ -44,6 +45,8 @@ export interface WorldStats {
   hotCells: number;
   /** Живых растений. */
   plants: number;
+  /** Живых организмов. */
+  fauna: number;
   thermalIdle: boolean;
   skyLight: number;
   weather: number;
@@ -62,6 +65,9 @@ export class World {
    * лёд тает навсегда, и мир становится однородным.
    */
   readonly ambient: Int16Array;
+
+  /** Живность: организмы, живущие по алгоритмам. */
+  readonly fauna = new Fauna();
 
   tick = 0;
   /** Всё остыло до своей температуры среды — тепловой проход можно не считать. */
@@ -213,6 +219,7 @@ export class World {
       counts,
       hotCells: hot,
       plants,
+      fauna: this.fauna.count,
       thermalIdle: this.thermalIdle,
       skyLight: this.skyLight,
       weather: this.weather.kind,
@@ -270,6 +277,7 @@ export class World {
         { id: SEC.AMBIENT, data: i16Bytes(this.ambient) },
         { id: SEC.RNG, data: u32Bytes(this.rng.state()) },
         { id: SEC.DIRTY, data: g.dirtyNextBytes() },
+        { id: SEC.FAUNA, data: this.fauna.toBytes() },
       ],
     });
   }
@@ -328,6 +336,9 @@ export class World {
           break;
         case SEC.DIRTY:
           g.restoreDirtyNext(section.data);
+          break;
+        case SEC.FAUNA:
+          w.fauna.fromBytes(section.data);
           break;
         default:
           break;

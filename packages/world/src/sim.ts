@@ -12,17 +12,30 @@
 import { CHUNK, FLAG, MOVE_MASK } from './grid.ts';
 import { BOTANY_EVERY, growPlant, plantNeedsTime } from './botany.ts';
 import {
+  BURN_INTO_CHANCE,
+  BURN_TEMP,
   CONDUCT,
+  DENSITY,
+  DISPERSION,
   EMISSIVE,
+  FLAMMABLE,
+  FREEZE_CHANCE,
+  FREEZE_INTO,
+  FREEZE_TEMP,
   IS_PLANT,
+  LIFETIME,
+  LIFETIME_INTO,
   LIGHT_ATTEN,
   MAT,
+  MAT_STATE,
   MATERIALS,
+  MELT_CHANCE,
+  MELT_INTO,
+  MELT_TEMP,
   NEEDS_TIME,
   NO_FREEZE,
   NO_TEMP,
   ST,
-  canDisplace,
 } from './materials.ts';
 import type { MatDef } from './materials.ts';
 import type { World } from './world.ts';
@@ -62,8 +75,15 @@ export function stepWorld(w: World): void {
   if (w.tick % w.cfg.heatEveryTicks === 0) stepHeat(w);
   if (w.cfg.weather) stepWeather(w);
 
+  // Живность ходит каждый тик: движение должно быть плавным, а восприятие
+  // внутри устроено реже (см. Fauna.step).
+  w.fauna.step(w);
+
   w.tick++;
 }
+
+/** Счётчики для замеров: сколько работы реально делается за тик. */
+export const debugStats = { chunks: 0, cells: 0, ticks: 0 };
 
 function updateMaterials(w: World, moveBit: number): void {
   const g = w.grid;
@@ -73,12 +93,21 @@ function updateMaterials(w: World, moveBit: number): void {
   const cols = g.cols;
   const rows = g.rows;
   const ambient = w.ambient;
+  const mat = g.mat;
+  const flags = g.flags;
+  const temp = g.temp;
   const botanyTick = w.tick % BOTANY_EVERY === 0;
+
+  debugStats.ticks++;
+  debugStats.chunks = 0;
+  debugStats.cells = 0;
 
   for (let cy = rows - 1; cy >= 0; cy--) {
     for (let cx = 0; cx < cols; cx++) {
       const c = cy * cols + cx;
-      if (!g.isDirty(c)) continue;
+      if (g.isDirty(c) === false) continue;
+      debugStats.chunks++;
+      debugStats.cells += CHUNK * CHUNK;
 
       const x0 = cx * CHUNK;
       const x1 = Math.min(x0 + CHUNK, W);
@@ -93,7 +122,7 @@ function updateMaterials(w: World, moveBit: number): void {
       const stale = moveBit === FLAG.MOVE_A ? FLAG.MOVE_B : FLAG.MOVE_A;
       for (let y = y0; y < y1; y++) {
         const rowBase = y * W;
-        for (let x = x0; x < x1; x++) g.flags[rowBase + x] &= ~stale;
+        for (let x = x0; x < x1; x++) flags[rowBase + x] &= ~stale;
       }
 
       for (let y = y1 - 1; y >= y0; y--) {
@@ -102,18 +131,16 @@ function updateMaterials(w: World, moveBit: number): void {
         for (let k = x0; k < x1; k++) {
           const x = ltr ? k : x1 - 1 - (k - x0);
           const i = rowBase + x;
-          if ((g.flags[i] & moveBit) !== 0) continue;
+          if ((flags[i] & moveBit) !== 0) continue;
 
-          const m0 = g.mat[i];
-          if (m0 !== MAT.AIR && NEEDS_TIME[m0] === 1 && cellNeedsTime(w, i, m0, ambient[i])) {
+          const m0 = mat[i];
+          if (m0 !== MAT.AIR && NEEDS_TIME[m0] === 1 && cellNeedsTime(w, i, m0, ambient[i], temp[i])) {
             awake = true;
           }
 
           updateCell(w, x, y, i, moveBit);
 
-          if (botanyTick && g.mat[i] !== MAT.AIR && isPlant(g.mat[i])) {
-            growPlant(w, x, y, i);
-          }
+          if (botanyTick && IS_PLANT[mat[i]] === 1) growPlant(w, x, y, i);
         }
       }
 
@@ -131,23 +158,24 @@ function isPlant(m: number): boolean {
  * Клетке нужно внимание и на следующем тике?
  *
  * Так помечаются: всё, у чего есть время жизни (огонь, дым, пар); всё, что
- * нагрето выше среды и может воспламениться; всё, что может сменить фазу;
- * всё, что растёт. Обычный камень или вода при температуре среды сюда не
- * попадают — их чанк засыпает, и именно на этом экономится процессор.
+ * может сменить фазу или загореться; всё, что растёт. Обычный камень или
+ * вода при температуре среды сюда не попадают — их чанк засыпает, и именно
+ * на этом экономится процессор.
  */
-function cellNeedsTime(w: World, i: number, m: number, ambient: number): boolean {
-  const g = w.grid;
-  const d = MATERIALS[m];
-
+function cellNeedsTime(w: World, i: number, m: number, ambient: number, t: number): boolean {
   // Время жизни — это время, оно течёт независимо от температуры.
-  if (d.lifetime > 0) return true;
+  if (LIFETIME[m] > 0) return true;
 
-  // Фазовые переходы и горение смотрим только при отклонении от среды.
-  const t = g.temp[i];
-  if (t !== ambient) {
-    if (d.flammable > 0 && t > ambient + 5) return true;
-    if (d.meltTemp !== NO_TEMP || d.freezeTemp !== NO_FREEZE) return true;
-  }
+  const melt = MELT_TEMP[m];
+  const freeze = FREEZE_TEMP[m];
+
+  // Важно сравнивать не только с температурой клетки, но и со средой: вода
+  // в холодной полосе мира обязана замёрзнуть, даже если её собственная
+  // температура уже сравнялась со средой. Иначе её чанк уснёт и лёд не встанет.
+  if (melt !== NO_TEMP && (t >= melt || ambient >= melt)) return true;
+  if (freeze !== NO_FREEZE && (t <= freeze || ambient <= freeze)) return true;
+
+  if (FLAMMABLE[m] > 0 && (t >= BURN_TEMP[m] || t > ambient + 5)) return true;
 
   if (IS_PLANT[m] === 1) return plantNeedsTime(w, i, m);
   return false;
@@ -155,23 +183,29 @@ function cellNeedsTime(w: World, i: number, m: number, ambient: number): boolean
 
 function updateCell(w: World, x: number, y: number, i: number, moveBit: number): void {
   const g = w.grid;
-  let m = g.mat[i];
+  const flags = g.flags;
+  const mat = g.mat;
+  let m = mat[i];
   if (m === MAT.AIR) return;
 
   react(w, x, y, i);
-  m = g.mat[i];
+  m = mat[i];
   if (m === MAT.AIR) return;
 
-  const d = MATERIALS[m];
-  switch (d.state) {
+  // Покоящуюся клетку двигать не пробуем: попытка стоит столько же, сколько
+  // движение, а решение «стою» пересматривается только когда рядом что-то
+  // изменилось (Grid.touch снимает флаг).
+  if ((flags[i] & FLAG.SETTLED) !== 0) return;
+
+  switch (MAT_STATE[m]) {
     case ST.POWDER:
-      movePowder(w, x, y, i, moveBit);
+      if (!movePowder(w, x, y, i, moveBit)) flags[i] |= FLAG.SETTLED;
       break;
     case ST.LIQUID:
-      moveLiquid(w, x, y, i, moveBit, d);
+      if (!moveLiquid(w, x, y, i, moveBit, m)) flags[i] |= FLAG.SETTLED;
       break;
     case ST.GAS:
-      moveGas(w, x, y, i, moveBit, d);
+      if (!moveGas(w, x, y, i, moveBit, m)) flags[i] |= FLAG.SETTLED;
       break;
     default:
       // Твёрдое тело и огонь стоят на месте. Огонь намеренно не всплывает:
@@ -181,9 +215,9 @@ function updateCell(w: World, x: number, y: number, i: number, moveBit: number):
 }
 
 /** Поджечь клетку, запомнив, останется ли после неё пепел. */
-function ignite(w: World, x: number, y: number, i: number, fuel: MatDef): void {
+function ignite(w: World, x: number, y: number, i: number, ashChance: number): void {
   const g = w.grid;
-  const ash = w.rng.chance(fuel.burnIntoChance);
+  const ash = w.rng.chance(ashChance);
   g.set(x, y, MAT.FIRE);
   g.flags[i] = ash ? FLAG.BURNING : 0;
 }
@@ -192,45 +226,55 @@ function ignite(w: World, x: number, y: number, i: number, fuel: MatDef): void {
 function react(w: World, x: number, y: number, i: number): void {
   const g = w.grid;
   const rng = w.rng;
-  const m = g.mat[i];
+  const mat = g.mat;
+  const m = mat[i];
 
   if (m === MAT.FIRE) {
     reactFire(w, x, y, i);
     return;
   }
 
-  const d = MATERIALS[m];
   const t = g.temp[i];
 
-  if (d.lifetime > 0) {
-    if (g.aux[i] === 0) g.aux[i] = (d.lifetime * (0.6 + rng.nextFloat() * 0.8)) | 0;
-    g.aux[i]--;
-    if (g.aux[i] === 0) {
-      g.set(x, y, d.lifetimeInto);
+  const life = LIFETIME[m];
+  if (life > 0) {
+    const aux = g.aux;
+    if (aux[i] === 0) aux[i] = (life * (0.6 + rng.nextFloat() * 0.8)) | 0;
+    aux[i]--;
+    if (aux[i] === 0) {
+      g.set(x, y, LIFETIME_INTO[m]);
       return;
     }
   }
 
-  if (d.flammable > 0 && t >= d.burnTemp && rng.chance(d.flammable)) {
-    ignite(w, x, y, i, d);
+  const flam = FLAMMABLE[m];
+  if (flam > 0 && t >= BURN_TEMP[m] && rng.chance(flam)) {
+    ignite(w, x, y, i, BURN_INTO_CHANCE[m]);
     return;
   }
 
-  if (d.meltTemp !== NO_TEMP && t >= d.meltTemp && rng.chance(d.meltChance)) {
-    g.set(x, y, d.meltInto);
+  const melt = MELT_TEMP[m];
+  if (melt !== NO_TEMP && t >= melt && rng.chance(MELT_CHANCE[m])) {
+    g.set(x, y, MELT_INTO[m]);
     return;
   }
 
-  if (d.freezeTemp !== NO_FREEZE && t <= d.freezeTemp && rng.chance(d.freezeChance)) {
-    g.set(x, y, d.freezeInto);
+  const freeze = FREEZE_TEMP[m];
+  if (freeze !== NO_FREEZE && t <= freeze && rng.chance(FREEZE_CHANCE[m])) {
+    g.set(x, y, FREEZE_INTO[m]);
     return;
   }
 
   // Мокрый грунт превращается в грязь, а грязь на свету высыхает.
-  if (m === MAT.DIRT) {
-    if (rng.chance(0.004) && hasNeighbor(w, x, y, MAT.WATER)) g.set(x, y, MAT.MUD);
-  } else if (m === MAT.MUD) {
-    if (g.light[i] > 140 && rng.chance(0.001)) g.set(x, y, MAT.DIRT);
+  // Образование грязи нарочно медленное: если оно идёт быстро, дождь
+  // размывает всю почву, грязь сползает по склонам, засыпает луг,
+  // и трава вымирает за несколько минут.
+  if ((w.tick & 3) === 0 && (m === MAT.DIRT || m === MAT.MUD)) {
+    if (m === MAT.DIRT) {
+      if (rng.chance(0.002) && hasNeighbor(w, x, y, MAT.WATER)) g.set(x, y, MAT.MUD);
+    } else if (g.light[i] > 140 && rng.chance(0.02)) {
+      g.set(x, y, MAT.DIRT);
+    }
   }
 }
 
@@ -275,9 +319,9 @@ function reactFire(w: World, x: number, y: number, i: number): void {
         if (rng.chance(0.5)) g.set(nx, ny, nm === MAT.ICE ? MAT.WATER : MAT.STEAM);
         return;
       }
-      const nd = MATERIALS[nm];
-      if (nd.flammable > 0 && rng.chance(nd.flammable)) {
-        ignite(w, nx, ny, j, nd);
+      const nd = FLAMMABLE[nm];
+      if (nd > 0 && rng.chance(nd)) {
+        ignite(w, nx, ny, j, BURN_INTO_CHANCE[nm]);
       }
     }
   }
@@ -287,6 +331,16 @@ function reactFire(w: World, x: number, y: number, i: number): void {
     if (ash) g.set(x, y, MAT.ASH);
     else g.set(x, y, rng.chance(0.65) ? MAT.SMOKE : MAT.AIR);
   }
+}
+
+/** Может ли вещество с такими свойствами занять клетку target. */
+function canDisplaceFast(selfState: number, selfDensity: number, target: number): boolean {
+  if (target === MAT.AIR) return true;
+  const ts = MAT_STATE[target];
+  if (ts === ST.SOLID || ts === ST.POWDER) return false;
+  if (ts === ST.LIQUID) return selfState === ST.GAS;
+  if (selfState === ST.GAS || selfState === ST.ENERGY) return DENSITY[target] > selfDensity;
+  return true;
 }
 
 /** Перемещение с обменом: тяжёлое вниз, лёгкое вверх, воздух просто уступает место. */
@@ -303,39 +357,43 @@ function tryMove(
   if (nx < 0 || nx >= g.w || ny < 0 || ny >= g.h) return false;
 
   const j = ny * g.w + nx;
-  if ((g.flags[j] & moveBit) !== 0) return false;
+  const flags = g.flags;
+  if ((flags[j] & moveBit) !== 0) return false;
 
-  const self = MATERIALS[g.mat[i]];
-  const targetMat = g.mat[j];
-  if (!canDisplace(self, targetMat)) return false;
+  const mat = g.mat;
+  const self = mat[i];
+  const targetMat = mat[j];
+  if (!canDisplaceFast(MAT_STATE[self], DENSITY[self], targetMat)) return false;
 
-  const tMat = targetMat;
-  const tFlags = g.flags[j];
-  const tTemp = g.temp[j];
-  const tAux = g.aux[j];
+  const temp = g.temp;
+  const aux = g.aux;
 
-  g.mat[j] = self.id;
+  const tFlags = flags[j];
+  const tTemp = temp[j];
+  const tAux = aux[j];
+
+  mat[j] = self;
   // Ставим бит «двигалась» только за текущий тик: если оставить и старый,
   // частица накопила бы оба бита и застряла навсегда.
-  g.flags[j] = (g.flags[i] & ~MOVE_MASK) | moveBit;
-  g.temp[j] = g.temp[i];
-  g.aux[j] = g.aux[i];
+  flags[j] = (flags[i] & ~MOVE_MASK) | moveBit;
+  temp[j] = temp[i];
+  aux[j] = aux[i];
 
-  g.mat[i] = tMat;
-  g.flags[i] = tFlags & ~MOVE_MASK; // вытесненному газу даём шанс всплыть в этом же тике
-  g.temp[i] = tTemp;
-  g.aux[i] = tAux;
+  mat[i] = targetMat;
+  flags[i] = tFlags & ~MOVE_MASK; // вытесненному газу даём шанс всплыть в этом же тике
+  temp[i] = tTemp;
+  aux[i] = tAux;
 
   g.touch(x, y);
   g.touch(nx, ny);
   return true;
 }
 
-function movePowder(w: World, x: number, y: number, i: number, moveBit: number): void {
-  if (tryMove(w, x, y, x, y + 1, i, moveBit)) return;
+function movePowder(w: World, x: number, y: number, i: number, moveBit: number): boolean {
+  if (tryMove(w, x, y, x, y + 1, i, moveBit)) return true;
   const dir = w.rng.sign();
-  if (tryMove(w, x, y, x + dir, y + 1, i, moveBit)) return;
-  tryMove(w, x, y, x - dir, y + 1, i, moveBit);
+  if (tryMove(w, x, y, x + dir, y + 1, i, moveBit)) return true;
+  return tryMove(w, x, y, x - dir, y + 1, i, moveBit);
 }
 
 function moveLiquid(
@@ -344,24 +402,26 @@ function moveLiquid(
   y: number,
   i: number,
   moveBit: number,
-  d: MatDef,
-): void {
-  if (tryMove(w, x, y, x, y + 1, i, moveBit)) return;
+  m: number,
+): boolean {
+  if (tryMove(w, x, y, x, y + 1, i, moveBit)) return true;
 
   const dir = w.rng.sign();
-  if (tryMove(w, x, y, x + dir, y + 1, i, moveBit)) return;
-  if (tryMove(w, x, y, x - dir, y + 1, i, moveBit)) return;
+  if (tryMove(w, x, y, x + dir, y + 1, i, moveBit)) return true;
+  if (tryMove(w, x, y, x - dir, y + 1, i, moveBit)) return true;
 
   const g = w.grid;
-  const self = MATERIALS[g.mat[i]];
+  const mat = g.mat;
   let best = -1;
-  for (let s = 1; s <= d.dispersion; s++) {
+  const dispersion = DISPERSION[m];
+  for (let s = 1; s <= dispersion; s++) {
     const nx = x + dir * s;
     if (nx < 0 || nx >= g.w) break;
-    if (!canDisplace(self, g.mat[y * g.w + nx])) break;
+    if (!canDisplaceFast(MAT_STATE[m], DENSITY[m], mat[y * g.w + nx])) break;
     best = nx;
   }
-  if (best >= 0) tryMove(w, x, y, best, y, i, moveBit);
+  if (best >= 0) return tryMove(w, x, y, best, y, i, moveBit);
+  return false;
 }
 
 function moveGas(
@@ -370,18 +430,18 @@ function moveGas(
   y: number,
   i: number,
   moveBit: number,
-  d: MatDef,
-): void {
+  m: number,
+): boolean {
   const rng = w.rng;
-  if (tryMove(w, x, y, x, y - 1, i, moveBit)) return;
+  if (tryMove(w, x, y, x, y - 1, i, moveBit)) return true;
 
   const dir = rng.sign();
-  if (tryMove(w, x, y, x + dir, y - 1, i, moveBit)) return;
-  if (tryMove(w, x, y, x - dir, y - 1, i, moveBit)) return;
+  if (tryMove(w, x, y, x + dir, y - 1, i, moveBit)) return true;
+  if (tryMove(w, x, y, x - dir, y - 1, i, moveBit)) return true;
 
-  const spread = Math.max(1, d.dispersion);
+  const spread = Math.max(1, DISPERSION[m]);
   const step = 1 + rng.nextInt(spread);
-  tryMove(w, x, y, x + dir * step, y, i, moveBit);
+  return tryMove(w, x, y, x + dir * step, y, i, moveBit);
 }
 
 /**
@@ -583,10 +643,9 @@ export function strikeLightning(w: World, x: number): void {
     const i = y * g.w + x;
     const m = g.mat[i];
     if (m === MAT.AIR || m === MAT.WATER || m === MAT.SMOKE || m === MAT.STEAM) continue;
-    const d = MATERIALS[m];
-    if (d.flammable > 0) {
-      ignite(w, x, y, i, d);
-    } else if (d.state === ST.SOLID || d.state === ST.POWDER) {
+    if (FLAMMABLE[m] > 0) {
+      ignite(w, x, y, i, BURN_INTO_CHANCE[m]);
+    } else if (MAT_STATE[m] === ST.SOLID || MAT_STATE[m] === ST.POWDER) {
       // Разряд уходит в землю: там просто становится жарко.
       w.heat(x, y, 2, 250);
     }

@@ -269,7 +269,10 @@ on('GET', '/api/stats', (_req, res) => {
     cells: s.cells,
     chunks: s.chunks,
     hotCells: s.hotCells,
+    plants: s.plants,
     thermalIdle: s.thermalIdle,
+    skyLight: s.skyLight,
+    weather: s.weather,
     byMaterial,
   });
 });

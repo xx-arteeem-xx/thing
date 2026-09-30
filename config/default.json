@@ -5,7 +5,7 @@
     "seed": 20251001,
     "ambient": 20,
     "heatEveryTicks": 4,
-    "lightEveryTicks": 4,
+    "lightEveryTicks": 8,
     "dayLengthTicks": 4800,
     "weather": true,
     "tickHz": 60

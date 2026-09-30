@@ -21,10 +21,16 @@ export const CHUNK = 16;
 export const FLAG = {
   MOVE_A: 1 << 0,
   MOVE_B: 1 << 1,
-  /** Горит (зарезервировано для Ф0+). */
+  /** Горит: после огня останется пепел. */
   BURNING: 1 << 2,
   /** Мокрая (зарезервировано: тушение, растворение). */
   WET: 1 << 3,
+  /**
+   * Клетка уже пробовала сдвинуться и не смогла. Такую не нужно пытаться
+   * двигать каждый тик — попытка стоит столько же, сколько движение.
+   * Флаг снимается, как только что-то изменилось рядом (см. touch).
+   */
+  SETTLED: 1 << 4,
 } as const;
 
 /** Биты, которые переживают смену вещества в клетке. */
@@ -95,6 +101,16 @@ export class Grid {
     const c = cy * this.cols + cx;
     this.dirtyNext[c] = 1;
     this.changed[c] = 1;
+
+    // Рядом что-то изменилось — снимаем «покоится» с клетки и её соседей,
+    // иначе они никогда не пересмотрят своё решение стоять на месте.
+    const W = this.w;
+    const i = y * W + x;
+    this.flags[i] &= ~FLAG.SETTLED;
+    if (x > 0) this.flags[i - 1] &= ~FLAG.SETTLED;
+    if (x < W - 1) this.flags[i + 1] &= ~FLAG.SETTLED;
+    if (y > 0) this.flags[i - W] &= ~FLAG.SETTLED;
+    if (y < this.h - 1) this.flags[i + W] &= ~FLAG.SETTLED;
 
     const lx = x & 15;
     const ly = y & 15;
