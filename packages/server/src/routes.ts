@@ -20,6 +20,7 @@ export interface RouteDef {
 }
 
 export const ROUTES: readonly RouteDef[] = [
+  { method: 'GET', path: '/health', mutating: false, description: 'жив ли процесс и идёт ли время' },
   { method: 'GET', path: '/api/meta', mutating: false, description: 'состояние симуляции и её темп' },
   { method: 'GET', path: '/api/frame', mutating: false, description: 'кадр мира: кейфрейм или патч изменившихся чанков' },
   { method: 'GET', path: '/api/materials', mutating: false, description: 'справочник веществ' },

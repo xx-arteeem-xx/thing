@@ -51,6 +51,8 @@ export const SEC = {
   POLICY: 9,
   EVENTS: 10,
   DIRTY: 11,
+  LIGHT: 12,
+  AMBIENT: 13,
 } as const;
 
 function i16Bytes(values: Int16Array): Uint8Array {

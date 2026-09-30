@@ -27,8 +27,11 @@ const world = new World({
   seed,
   ambient: cfg.world.ambient,
   heatEveryTicks: cfg.world.heatEveryTicks,
+  lightEveryTicks: cfg.world.lightEveryTicks,
+  dayLengthTicks: cfg.world.dayLengthTicks,
+  weather: cfg.world.weather,
 });
-generateTerrain(world);
+generateTerrain(world, { trees: 26 });
 
 // Прогрев: первый тик всегда дороже (джемы, прогрев JIT).
 for (let i = 0; i < 120; i++) world.tickOnce();

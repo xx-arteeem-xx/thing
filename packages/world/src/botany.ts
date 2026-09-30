@@ -129,7 +129,7 @@ function growGrass(w: World, x: number, y: number, i: number): void {
     return;
   }
 
-  if (!rng.chance(0.05)) return;
+  if (!rng.chance(0.16)) return;
 
   const dirs = [
     [1, 0],
@@ -139,16 +139,21 @@ function growGrass(w: World, x: number, y: number, i: number): void {
     [1, -1],
     [-1, -1],
   ];
-  const [dx, dy] = dirs[rng.nextInt(dirs.length)];
-  const nx = x + dx;
-  const ny = y + dy;
-  if (nx < 0 || nx >= g.w || ny < 0 || ny >= g.h) return;
 
-  const j = idx(g, nx, ny);
-  if (g.mat[j] !== MAT.DIRT) return;
-  if (ny - 1 < 0 || g.mat[idx(g, nx, ny - 1)] !== MAT.AIR) return;
+  // Пробуем два направления за раз: луг должен зарастать за минуту,
+  // а не за десять.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const [dx, dy] = dirs[rng.nextInt(dirs.length)];
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || nx >= g.w || ny < 0 || ny >= g.h) continue;
 
-  g.set(nx, ny, MAT.GRASS);
+    const j = idx(g, nx, ny);
+    if (g.mat[j] !== MAT.DIRT) continue;
+    if (ny - 1 < 0 || g.mat[idx(g, nx, ny - 1)] !== MAT.AIR) continue;
+
+    g.set(nx, ny, MAT.GRASS);
+  }
 }
 
 function growBush(w: World, x: number, y: number, i: number): void {

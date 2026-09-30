@@ -9,8 +9,8 @@
  *   u32 magic | u8 version | u8 type | u8 compression | u8 reserved
  *   u32 tick | u16 width | u16 height | u32 payloadLen | payload
  *
- * payload кейфрейма: mat (w*h байт) | temp (w*h*2 байт, i16 LE)
- * payload патча:    u32 chunkCount | [ u16 cx | u16 cy | 256 байт mat | 512 байт temp ] *
+ * payload кейфрейма: mat (w*h) | temp (w*h*2, i16 LE) | light (w*h)
+ * payload патча:    u32 chunkCount | [ u16 cx | u16 cy | 256 mat | 512 temp | 256 light ] *
  */
 import { deflateSync } from 'node:zlib';
 import { CHUNK } from '../../world/src/grid.ts';
@@ -32,7 +32,7 @@ export const COMP = {
 } as const;
 
 const CHUNK_CELLS = CHUNK * CHUNK;
-const CHUNK_BYTES = CHUNK_CELLS + CHUNK_CELLS * 2;
+const CHUNK_BYTES = CHUNK_CELLS + CHUNK_CELLS * 2 + CHUNK_CELLS;
 
 function header(
   type: number,
@@ -78,7 +78,7 @@ export function encodeNoChange(tick: number, width: number, height: number): Buf
 export function encodeKeyframe(w: World, compress = true): Buffer {
   const g = w.grid;
   const cells = g.w * g.h;
-  const payload = Buffer.alloc(cells + cells * 2);
+  const payload = Buffer.alloc(cells * 4);
 
   payload.set(g.mat, 0);
 
@@ -87,6 +87,7 @@ export function encodeKeyframe(w: World, compress = true): Buffer {
     payload.writeInt16LE(g.temp[i], o);
     o += 2;
   }
+  payload.set(g.light, o);
 
   return wrap(FT.KEYFRAME, w.tick, g.w, g.h, payload, compress);
 }
@@ -134,6 +135,19 @@ export function encodePatch(w: World, chunks: readonly number[], compress = true
         const x = x0 + lx;
         payload.writeInt16LE(x < g.w ? g.temp[rowBase + x] : 0, o);
         o += 2;
+      }
+    }
+
+    for (let ly = 0; ly < CHUNK; ly++) {
+      const y = y0 + ly;
+      if (y >= g.h) {
+        o += CHUNK;
+        continue;
+      }
+      const rowBase = y * g.w;
+      for (let lx = 0; lx < CHUNK; lx++) {
+        const x = x0 + lx;
+        payload[o++] = x < g.w ? g.light[rowBase + x] : 0;
       }
     }
   }

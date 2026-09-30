@@ -283,13 +283,6 @@ export const MATERIALS: MatDef[] = [
     burnInto: MAT.ASH,
     burnIntoChance: 0.4,
   }),
-  def({ id: MAT.FRUIT, key: 'fruit', name: 'плод', state: ST.POWDER, color: [206, 76, 62] }, {
-    variance: 24,
-    density: 600,
-    conductivity: 0.25,
-    lightAtten: 14,
-  }),
-
   // --- грунт
   def({ id: MAT.MUD, key: 'mud', name: 'грязь', state: ST.POWDER, color: [78, 56, 38] }, {
     variance: 14,
@@ -377,9 +370,84 @@ export const MATERIALS: MatDef[] = [
     conductivity: 0.3,
     lightAtten: OPAQUE,
   }),
+  def({ id: MAT.FRUIT, key: 'fruit', name: 'плод', state: ST.POWDER, color: [206, 76, 62] }, {
+    variance: 24,
+    density: 600,
+    conductivity: 0.25,
+    lightAtten: 14,
+  }),
 ];
 
 export const MATERIAL_COUNT = MATERIALS.length;
+
+/**
+ * Плоские таблицы поиска по идентификатору вещества.
+ *
+ * В горячих циклах (свет, тепло, обход клеток) обращение к объекту
+ * MATERIALS[m] стоит в разы дороже, чем чтение из типизированного массива.
+ * Замер показывал 3 мс на проход света и 5 мс на проход тепла — почти всё
+ * это уходило на разыменование объектов.
+ */
+export const LIGHT_ATTEN = new Uint8Array(MATERIAL_COUNT);
+export const EMISSIVE = new Uint8Array(MATERIAL_COUNT);
+export const CONDUCT = new Float32Array(MATERIAL_COUNT);
+export const IS_PLANT = new Uint8Array(MATERIAL_COUNT);
+export const DENSITY = new Float32Array(MATERIAL_COUNT);
+export const MAT_STATE = new Uint8Array(MATERIAL_COUNT);
+
+for (const m of MATERIALS) {
+  LIGHT_ATTEN[m.id] = m.lightAtten;
+  EMISSIVE[m.id] = m.emissive;
+  CONDUCT[m.id] = m.conductivity;
+  DENSITY[m.id] = m.density;
+  MAT_STATE[m.id] = m.state;
+  IS_PLANT[m.id] =
+    m.id === MAT.GRASS ||
+    m.id === MAT.LEAVES ||
+    m.id === MAT.SAPLING ||
+    m.id === MAT.SEED ||
+    m.id === MAT.BUSH ||
+    m.id === MAT.FLOWER ||
+    m.id === MAT.MUSHROOM
+      ? 1
+      : 0;
+}
+
+/**
+ * Может ли это вещество вообще «жить во времени»: гореть, плавиться,
+ * замерзать, иметь срок жизни или расти. Для камня и стекла — нет, и это
+ * позволяет не звать для них функцию проверки на каждом тике.
+ */
+export const NEEDS_TIME = new Uint8Array(MATERIAL_COUNT);
+for (const m of MATERIALS) {
+  NEEDS_TIME[m.id] =
+    m.lifetime > 0 ||
+    m.flammable > 0 ||
+    m.meltTemp !== NO_TEMP ||
+    m.freezeTemp !== NO_FREEZE ||
+    IS_PLANT[m.id] === 1
+      ? 1
+      : 0;
+}
+
+/**
+ * Массив обязан быть проиндексирован по id: MATERIALS[m] — это поиск свойств
+ * по идентификатору вещества. Однажды порядок уже был перепутан (плод попал
+ * в середину таблицы), и вся симуляция выше этой точки поехала: у снега
+ * оказались свойства руды, у пепла — металла.
+ *
+ * Поэтому таблица сортируется по id, а не полагается на порядок записи:
+ * в исходнике вещества сгруппированы по смыслу, а индекс — по идентификатору.
+ */
+MATERIALS.sort((a, b) => a.id - b.id);
+
+for (let i = 0; i < MATERIALS.length; i++) {
+  if (MATERIALS[i].id !== i) {
+    throw new Error(
+      `таблица веществ сломана: MATERIALS[${i}] — это «${MATERIALS[i].key}» с id ${MATERIALS[i].id}`,
+    );
+  }
+}
 
 /** Может ли вещество self занять клетку, занятую target. */
 export function canDisplace(self: MatDef, targetId: number): boolean {

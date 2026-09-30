@@ -16,6 +16,9 @@ export interface Config {
     seed: number;
     ambient: number;
     heatEveryTicks: number;
+    lightEveryTicks: number;
+    dayLengthTicks: number;
+    weather: boolean;
     tickHz: number;
   };
   server: {
@@ -55,6 +58,8 @@ function applyEnv(cfg: Config): void {
   cfg.world.height = num(env.THING_HEIGHT, cfg.world.height);
   cfg.world.seed = num(env.THING_SEED, cfg.world.seed);
   cfg.world.tickHz = num(env.THING_TICK_HZ, cfg.world.tickHz);
+  cfg.world.dayLengthTicks = num(env.THING_DAY_TICKS, cfg.world.dayLengthTicks);
+  if (env.THING_WEATHER !== undefined) cfg.world.weather = env.THING_WEATHER !== '0';
   cfg.server.host = env.THING_HOST ?? cfg.server.host;
   cfg.server.port = num(env.THING_PORT, cfg.server.port);
   if (env.THING_DEBUG !== undefined) cfg.debug.tools = env.THING_DEBUG === '1' || env.THING_DEBUG === 'true';

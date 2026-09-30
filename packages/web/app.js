@@ -10,17 +10,20 @@ const FRAME_MAGIC = 0x31524656;
 const FT = { KEYFRAME: 0, PATCH: 1, NOCHANGE: 2 };
 const CHUNK = 16;
 
+const WEATHER_NAME = ['ясно', 'дождь', 'снег', 'гроза'];
+const SKY_NIGHT = [10, 13, 26];
+const SKY_DAY = [92, 138, 198];
+
 const state = {
   width: 0,
   height: 0,
-  chunkCols: 0,
-  chunkRows: 0,
   mat: null,
   temp: null,
+  light: null,
   since: -1,
   materials: [],
   byId: new Map(),
-  selected: 3,
+  selected: 10,
   brush: 4,
   paused: false,
   debugTools: true,
@@ -89,13 +92,12 @@ async function decodeFrame(buffer) {
   return { type, tick, width, height, payload };
 }
 
-function allocate(width, height, chunkCols, chunkRows) {
+function allocate(width, height) {
   state.width = width;
   state.height = height;
-  state.chunkCols = chunkCols;
-  state.chunkRows = chunkRows;
   state.mat = new Uint8Array(width * height);
   state.temp = new Int16Array(width * height);
+  state.light = new Uint8Array(width * height);
   el.canvas.width = width;
   el.canvas.height = height;
   imageData = ctx.createImageData(width, height);
@@ -104,13 +106,16 @@ function allocate(width, height, chunkCols, chunkRows) {
 
 function applyKeyframe(frame) {
   if (!state.mat || state.width !== frame.width || state.height !== frame.height) {
-    allocate(frame.width, frame.height, Math.ceil(frame.width / CHUNK), Math.ceil(frame.height / CHUNK));
+    allocate(frame.width, frame.height);
   }
   const cells = frame.width * frame.height;
   const p = frame.payload;
   state.mat.set(p.subarray(0, cells), 0);
+
   const dv = new DataView(p.buffer, p.byteOffset + cells, cells * 2);
   for (let i = 0; i < cells; i++) state.temp[i] = dv.getInt16(i * 2, true);
+
+  state.light.set(p.subarray(cells + cells * 2, cells * 3 + cells * 2), 0);
   state.hasKeyframe = true;
 }
 
@@ -120,8 +125,8 @@ function applyPatch(frame) {
   const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
   const count = dv.getUint32(0, true);
   let o = 4;
-  const chunkBytes = CHUNK * CHUNK;
-  const chunkTempBytes = chunkBytes * 2;
+  const cells = CHUNK * CHUNK;
+  const tempBytes = cells * 2;
 
   for (let k = 0; k < count; k++) {
     const cx = dv.getUint16(o, true);
@@ -130,6 +135,7 @@ function applyPatch(frame) {
 
     const x0 = cx * CHUNK;
     const y0 = cy * CHUNK;
+
     for (let ly = 0; ly < CHUNK; ly++) {
       const y = y0 + ly;
       if (y >= state.height) {
@@ -143,10 +149,11 @@ function applyPatch(frame) {
         if (x < state.width) state.mat[row + x] = m;
       }
     }
+
     for (let ly = 0; ly < CHUNK; ly++) {
       const y = y0 + ly;
       if (y >= state.height) {
-        o += chunkTempBytes;
+        o += tempBytes;
         continue;
       }
       const row = y * state.width;
@@ -157,53 +164,65 @@ function applyPatch(frame) {
         if (x < state.width) state.temp[row + x] = t;
       }
     }
+
+    for (let ly = 0; ly < CHUNK; ly++) {
+      const y = y0 + ly;
+      if (y >= state.height) {
+        o += CHUNK;
+        continue;
+      }
+      const row = y * state.width;
+      for (let lx = 0; lx < CHUNK; lx++) {
+        const x = x0 + lx;
+        const l = p[o++];
+        if (x < state.width) state.light[row + x] = l;
+      }
+    }
   }
   return true;
 }
 
 // ------------------------------------------------------------------ отрисовка
 
-const AMBIENT = 20;
-
 function render() {
   if (!state.mat || !state.needsRedraw) return;
   state.needsRedraw = false;
 
-  const { width, height, mat, temp, byId } = state;
-  const n = width * height;
+  const { width, mat, temp, light, byId } = state;
+  const n = width * state.height;
 
   for (let i = 0; i < n; i++) {
     const m = mat[i];
-    const def = byId.get(m);
-    const base = def ? def.color : [255, 0, 255];
-    const variance = def ? def.variance : 0;
+    const lp = light[i] / 255;
 
-    let jitter = 0;
-    if (variance !== 0) {
-      const v = hash2d(i % width, (i / width) | 0);
-      jitter = ((((v >>> 8) & 0xff) / 255 - 0.5) * 2 * variance) | 0;
-    }
+    let r;
+    let g;
+    let b;
 
-    let r = base[0] + jitter;
-    let g = base[1] + jitter;
-    let b = base[2] + jitter;
+    if (m === 0) {
+      r = SKY_NIGHT[0] + (SKY_DAY[0] - SKY_NIGHT[0]) * lp;
+      g = SKY_NIGHT[1] + (SKY_DAY[1] - SKY_NIGHT[1]) * lp;
+      b = SKY_NIGHT[2] + (SKY_DAY[2] - SKY_NIGHT[2]) * lp;
+    } else {
+      const def = byId.get(m);
+      const base = def ? def.color : [255, 0, 255];
+      const variance = def ? def.variance : 0;
 
-    if (m !== 0) {
-      const dt = temp[i] - AMBIENT;
-      if (dt > 40) {
-        const k = Math.min(1, (dt - 40) / 400);
-        r += (255 - r) * k;
-        g += (170 - g) * k * 0.8;
-        b += (60 - b) * k * 0.6;
-        const glow = k * k * 0.6;
-        r += (255 - r) * glow;
-        g += (255 - g) * glow;
-        b += (230 - b) * glow;
-      } else if (dt < -8) {
-        const k = Math.min(1, (-dt - 8) / 60);
-        r += (150 - r) * k * 0.6;
-        g += (200 - g) * k * 0.5;
-        b += (255 - b) * k;
+      let jitter = 0;
+      if (variance !== 0) {
+        const v = hash2d(i % width, (i / width) | 0);
+        jitter = ((((v >>> 8) & 0xff) / 255 - 0.5) * 2 * variance) | 0;
+      }
+
+      const shade = 0.18 + 0.82 * lp;
+      r = (base[0] + jitter) * shade;
+      g = (base[1] + jitter) * shade;
+      b = (base[2] + jitter) * shade;
+
+      if (def && def.glow > 0) {
+        r = 255;
+        g = 150 + jitter;
+        b = 40;
       }
     }
 
@@ -227,7 +246,7 @@ async function pump() {
 
     if (frame.type === FT.KEYFRAME) applyKeyframe(frame);
     else if (frame.type === FT.PATCH) {
-      if (!applyPatch(frame)) state.since = -1; // потеряли базу — просим кейфрейм
+      if (!applyPatch(frame)) state.since = -1;
     }
 
     if (frame.type !== FT.NOCHANGE) state.needsRedraw = true;
@@ -241,6 +260,13 @@ async function pump() {
   }
 }
 
+function clockText(timeOfDay) {
+  const totalMinutes = Math.floor(timeOfDay * 24 * 60);
+  const hh = String(Math.floor(totalMinutes / 60)).padStart(2, '0');
+  const mm = String(totalMinutes % 60).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
 async function refreshMeta() {
   try {
     const meta = await (await fetch('/api/meta')).json();
@@ -251,7 +277,8 @@ async function refreshMeta() {
     el.metrics.innerHTML =
       `<span>тик <b>${meta.tick}</b></span>` +
       `<span>темп <b>${meta.tps}</b>/с</span>` +
-      `<span>просадка <b>${meta.droppedTicks}</b></span>` +
+      `<span>время <b>${clockText(meta.timeOfDay)}</b></span>` +
+      `<span>погода <b>${WEATHER_NAME[meta.weather] ?? meta.weather}</b></span>` +
       `<span>${meta.paused ? '<b>пауза</b>' : 'идёт'}</span>` +
       `<span>${meta.thermalIdle ? 'тепло: покой' : 'тепло: активно'}</span>` +
       `<span>${Math.floor(meta.uptimeSec / 60)} мин</span>`;
@@ -264,16 +291,21 @@ async function refreshMeta() {
 
 async function refreshStats() {
   try {
-    const [stats, meta] = await Promise.all([fetch('/api/stats').then((r) => r.json()), fetch('/api/meta').then((r) => r.json())]);
+    const [stats, meta] = await Promise.all([
+      fetch('/api/stats').then((r) => r.json()),
+      fetch('/api/meta').then((r) => r.json()),
+    ]);
     el.worldStats.innerHTML =
       `<dt>тик</dt><dd>${stats.tick}</dd>` +
       `<dt>клеток</dt><dd>${stats.cells.toLocaleString('ru-RU')}</dd>` +
-      `<dt>чанков</dt><dd>${stats.chunks}</dd>` +
+      `<dt>растений</dt><dd>${stats.plants.toLocaleString('ru-RU')}</dd>` +
       `<dt>горячих</dt><dd>${stats.hotCells.toLocaleString('ru-RU')}</dd>` +
+      `<dt>свет неба</dt><dd>${stats.skyLight}</dd>` +
       `<dt>размер</dt><dd>${meta.width}×${meta.height}</dd>`;
 
     const rows = state.materials
       .map((m) => ({ m, n: stats.byMaterial[m.key] ?? 0 }))
+      .filter((e) => e.n > 0)
       .sort((a, b) => b.n - a.n)
       .map(({ m, n }) => `<dt>${m.name}</dt><dd>${n.toLocaleString('ru-RU')}</dd>`)
       .join('');
@@ -286,7 +318,7 @@ async function refreshStats() {
       if (out && m) out.textContent = (stats.byMaterial[m.key] ?? 0).toLocaleString('ru-RU');
     }
   } catch {
-    /* игнорируем, следующий тик догонит */
+    /* следующий тик догонит */
   } finally {
     setTimeout(refreshStats, 1000);
   }
@@ -307,12 +339,12 @@ async function sendPoints() {
       groups.get(key).points.push({ x: a.x, y: a.y });
     }
     for (const group of groups.values()) {
-      const path = group.kind === 'heat' ? '/api/heat' : '/api/paint';
+      const path = group.kind === 'heat' || group.kind === 'cool' ? '/api/heat' : '/api/paint';
       const body =
         group.kind === 'heat'
           ? { points: group.points, r: state.brush, delta: 120 }
           : group.kind === 'cool'
-            ? { points: group.points, r: state.brush, mat: 0 }
+            ? { points: group.points, r: state.brush, delta: -120 }
             : { points: group.points, r: state.brush, mat: group.mat };
       await fetch(path, {
         method: 'POST',
@@ -344,12 +376,11 @@ el.canvas.addEventListener('pointerdown', (ev) => {
   el.canvas.setPointerCapture(ev.pointerId);
 
   if (ev.button === 1) {
-    const m = state.mat[y * state.width + x];
-    selectMaterial(m);
+    selectMaterial(state.mat[y * state.width + x]);
     ev.preventDefault();
     return;
   }
-  if (ev.button === 2) drawing = { kind: 'erase', mat: 0 };
+  if (ev.button === 2) drawing = { kind: 'paint', mat: 0 };
   else if (ev.shiftKey) drawing = { kind: 'heat' };
   else if (ev.ctrlKey || ev.metaKey) drawing = { kind: 'cool' };
   else drawing = { kind: 'paint', mat: state.selected };
@@ -382,7 +413,7 @@ function updateHover(x, y) {
   }
   const i = y * state.width + x;
   const def = state.byId.get(state.mat[i]);
-  el.hover.textContent = `x ${x} y ${y} · ${def ? def.name : '?'} · ${state.temp[i]}°C`;
+  el.hover.textContent = `x ${x} y ${y} · ${def ? def.name : '?'} · ${state.temp[i]}°C · свет ${state.light[i]}`;
 }
 
 // ------------------------------------------------------------------- панель
@@ -406,7 +437,10 @@ function buildPalette() {
     div.addEventListener('click', () => selectMaterial(m.id));
     el.materials.appendChild(div);
   }
-  selectMaterial(state.materials.some((m) => m.id === state.selected) ? state.selected : state.materials[0].id);
+  const initial = state.materials.some((m) => m.id === state.selected)
+    ? state.selected
+    : state.materials[0].id;
+  selectMaterial(initial);
 }
 
 el.brush.addEventListener('input', () => {

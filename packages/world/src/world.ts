@@ -20,7 +20,7 @@ import {
 } from '../../core/src/snapshot.ts';
 import { CHUNK, Grid } from './grid.ts';
 import { MAT, MATERIALS, MATERIAL_COUNT } from './materials.ts';
-import { stepWorld } from './sim.ts';
+import { WEATHER, computeSkyLight, stepWorld } from './sim.ts';
 
 export interface WorldConfig {
   width: number;
@@ -28,6 +28,10 @@ export interface WorldConfig {
   seed: number;
   ambient: number;
   heatEveryTicks: number;
+  lightEveryTicks: number;
+  /** Длина суток в тиках. 4800 тиков — это 80 секунд при 60 Гц. */
+  dayLengthTicks: number;
+  weather: boolean;
 }
 
 export interface WorldStats {
@@ -36,9 +40,13 @@ export interface WorldStats {
   chunks: number;
   /** Сколько клеток занято каждым веществом. */
   counts: number[];
-  /** Клеток с температурой, отличной от ambient. */
+  /** Клеток, заметно нагретых или охлаждённых относительно среды. */
   hotCells: number;
+  /** Живых растений. */
+  plants: number;
   thermalIdle: boolean;
+  skyLight: number;
+  weather: number;
 }
 
 const TEMP_MIN = -273;
@@ -58,6 +66,17 @@ export class World {
   tick = 0;
   /** Всё остыло до своей температуры среды — тепловой проход можно не считать. */
   thermalIdle = true;
+  /** Текущий небесный свет, 0..255. */
+  skyLight = 255;
+  weather: { kind: number; until: number } = { kind: WEATHER.CLEAR, until: 0 };
+
+  /**
+   * Чанки, в которых есть отклонение от температуры среды. Тепловой проход
+   * считает только их (и соседей), а не весь мир: в спокойном мире это
+   * разница между 5 мс и 0.1 мс на проход.
+   */
+  hotChunks: Uint8Array;
+  hotChunksNext: Uint8Array;
 
   private changedBuf: Int32Array;
 
@@ -68,6 +87,20 @@ export class World {
     this.changedBuf = new Int32Array(this.grid.chunkCount);
     this.ambient = new Int16Array(cfg.width * cfg.height);
     this.ambient.fill(cfg.ambient);
+    this.hotChunks = new Uint8Array(this.grid.chunkCount);
+    this.hotChunksNext = new Uint8Array(this.grid.chunkCount);
+    this.skyLight = computeSkyLight(0, cfg.dayLengthTicks);
+  }
+
+  /** Отметить, что в клетке (или рядом) есть тепло, требующее пересчёта. */
+  markHot(x: number, y: number): void {
+    this.hotChunks[this.grid.chunkIndex(x, y)] = 1;
+  }
+
+  swapHotChunks(): void {
+    const tmp = this.hotChunks;
+    this.hotChunks = this.hotChunksNext;
+    this.hotChunksNext = tmp;
   }
 
   /** Температура среды в клетке. */
@@ -76,7 +109,13 @@ export class World {
   }
 
   tickOnce(): void {
+    this.skyLight = computeSkyLight(this.tick, this.cfg.dayLengthTicks);
     stepWorld(this);
+  }
+
+  /** Доля суток: 0 — полночь, 0.5 — полдень. */
+  get timeOfDay(): number {
+    return (this.tick % this.cfg.dayLengthTicks) / this.cfg.dayLengthTicks;
   }
 
   /** Круговой инструмент наблюдателя: поставить вещество. */
@@ -96,11 +135,12 @@ export class World {
         if (mat === MAT.FIRE) {
           g.temp[i] = 700;
           this.thermalIdle = false;
-        } else if (mat === MAT.ICE) {
+          this.markHot(x, y);
+        } else if (mat === MAT.ICE || mat === MAT.SNOW) {
           g.temp[i] = Math.min(g.temp[i], this.ambient[i] - 8);
           this.thermalIdle = false;
-        } else if (mat === MAT.STONE) {
-          // камень из кисти приходит температурой среды
+          this.markHot(x, y);
+        } else if (mat === MAT.STONE || mat === MAT.DIRT || mat === MAT.SAND) {
           g.temp[i] = this.ambient[i];
         }
         g.set(x, y, mat);
@@ -127,6 +167,7 @@ export class World {
         const t = Math.max(TEMP_MIN, Math.min(TEMP_MAX, g.temp[i] + delta));
         g.temp[i] = t;
         g.touch(x, y);
+        this.markHot(x, y);
         touched++;
       }
     }
@@ -144,11 +185,26 @@ export class World {
     const g = this.grid;
     const counts = new Array<number>(MATERIAL_COUNT).fill(0);
     let hot = 0;
-    const ambient = this.cfg.ambient;
+    let plants = 0;
     for (let i = 0; i < g.mat.length; i++) {
-      counts[g.mat[i]]++;
+      const m = g.mat[i];
+      counts[m]++;
       const t = g.temp[i];
-      if (t > ambient + 1 || t < ambient - 1) hot++;
+      const a = this.ambient[i];
+      // «Горячие» — это действительно нагретое (огонь, остывающие угли),
+      // а не клетки, чуть отклонившиеся от среды на границе биомов.
+      if (t > a + 15 || t < a - 15) hot++;
+      if (
+        m === MAT.GRASS ||
+        m === MAT.LEAVES ||
+        m === MAT.SAPLING ||
+        m === MAT.SEED ||
+        m === MAT.BUSH ||
+        m === MAT.FLOWER ||
+        m === MAT.MUSHROOM
+      ) {
+        plants++;
+      }
     }
     return {
       tick: this.tick,
@@ -156,26 +212,32 @@ export class World {
       chunks: g.chunkCount,
       counts,
       hotCells: hot,
+      plants,
       thermalIdle: this.thermalIdle,
+      skyLight: this.skyLight,
+      weather: this.weather.kind,
     };
   }
 
   /** Отпечаток состояния — для проверок детерминизма и «бит в бит». */
   stateHash(): string {
     const g = this.grid;
-    const mat = new Uint8Array(g.mat.buffer, g.mat.byteOffset, g.mat.byteLength);
-    const flags = new Uint8Array(g.flags.buffer, g.flags.byteOffset, g.flags.byteLength);
-    const temp = i16Bytes(g.temp);
-    const aux = u16Bytes(g.aux);
-    const joined = new Uint8Array(mat.length + flags.length + temp.length + aux.length);
+    const parts = [
+      new Uint8Array(g.mat.buffer, g.mat.byteOffset, g.mat.byteLength),
+      new Uint8Array(g.flags.buffer, g.flags.byteOffset, g.flags.byteLength),
+      i16Bytes(g.temp),
+      u16Bytes(g.aux),
+      new Uint8Array(g.light.buffer, g.light.byteOffset, g.light.byteLength),
+      i16Bytes(this.ambient),
+    ];
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const joined = new Uint8Array(total);
     let o = 0;
-    joined.set(mat, o);
-    o += mat.length;
-    joined.set(flags, o);
-    o += flags.length;
-    joined.set(temp, o);
-    o += temp.length;
-    joined.set(aux, o);
+    for (const p of parts) {
+      joined.set(p, o);
+      o += p.length;
+    }
     return hashBytes(joined);
   }
 
@@ -187,10 +249,16 @@ export class World {
       width: this.cfg.width,
       height: this.cfg.height,
       meta: {
-        version: 1,
+        version: 2,
         ambient: this.cfg.ambient,
         heatEveryTicks: this.cfg.heatEveryTicks,
+        lightEveryTicks: this.cfg.lightEveryTicks,
+        dayLengthTicks: this.cfg.dayLengthTicks,
+        weather: this.cfg.weather,
+        weatherKind: this.weather.kind,
+        weatherUntil: this.weather.until,
         thermalIdle: this.thermalIdle,
+        skyLight: this.skyLight,
         materialCount: MATERIAL_COUNT,
       },
       sections: [
@@ -198,6 +266,8 @@ export class World {
         { id: SEC.FLAGS, data: new Uint8Array(g.flags.buffer, g.flags.byteOffset, g.flags.byteLength) },
         { id: SEC.TEMP, data: i16Bytes(g.temp) },
         { id: SEC.AUX, data: u16Bytes(g.aux) },
+        { id: SEC.LIGHT, data: new Uint8Array(g.light.buffer, g.light.byteOffset, g.light.byteLength) },
+        { id: SEC.AMBIENT, data: i16Bytes(this.ambient) },
         { id: SEC.RNG, data: u32Bytes(this.rng.state()) },
         { id: SEC.DIRTY, data: g.dirtyNextBytes() },
       ],
@@ -206,16 +276,31 @@ export class World {
 
   static fromSnapshot(buf: Buffer): World {
     const snap = readSnapshot(buf);
+    const storedCount = snap.meta.materialCount;
+    if (typeof storedCount === 'number' && storedCount !== MATERIAL_COUNT) {
+      throw new Error(
+        `снапшот сделан для ${storedCount} веществ, а в мире их ${MATERIAL_COUNT} — загружать нельзя`,
+      );
+    }
+
     const cfg: WorldConfig = {
       width: snap.width,
       height: snap.height,
       seed: snap.seed,
-      ambient: typeof snap.meta.ambient === 'number' ? snap.meta.ambient : 20,
-      heatEveryTicks: typeof snap.meta.heatEveryTicks === 'number' ? snap.meta.heatEveryTicks : 4,
+      ambient: numMeta(snap.meta.ambient, 20),
+      heatEveryTicks: numMeta(snap.meta.heatEveryTicks, 4),
+      lightEveryTicks: numMeta(snap.meta.lightEveryTicks, 4),
+      dayLengthTicks: numMeta(snap.meta.dayLengthTicks, 4800),
+      weather: snap.meta.weather === true,
     };
     const w = new World(cfg);
     w.tick = snap.tick;
     w.thermalIdle = snap.meta.thermalIdle === true;
+    w.skyLight = numMeta(snap.meta.skyLight, 255);
+    w.weather = {
+      kind: numMeta(snap.meta.weatherKind, WEATHER.CLEAR),
+      until: numMeta(snap.meta.weatherUntil, 0),
+    };
 
     const g = w.grid;
     for (const section of snap.sections) {
@@ -232,6 +317,12 @@ export class World {
         case SEC.AUX:
           g.aux.set(u16FromBytes(section.data).subarray(0, g.aux.length));
           break;
+        case SEC.LIGHT:
+          g.light.set(section.data.subarray(0, g.light.length));
+          break;
+        case SEC.AMBIENT:
+          w.ambient.set(i16FromBytes(section.data).subarray(0, w.ambient.length));
+          break;
         case SEC.RNG:
           w.rng.restore(u32FromBytes(section.data));
           break;
@@ -243,6 +334,10 @@ export class World {
       }
     }
 
+    // После загрузки неизвестно, какие чанки были горячими: если мир не
+    // в тепловом покое, честнее один раз пересчитать всё.
+    if (!w.thermalIdle) w.hotChunks.fill(1);
+
     // Намеренно НЕ помечаем весь мир грязным: набор грязных чанков — часть
     // состояния (см. Grid.dirtyNextBytes), иначе продолжение после загрузки
     // разошлось бы с непрерывным прогоном.
@@ -253,6 +348,10 @@ export class World {
   static materialList(): Array<{ id: number; key: string; name: string; color: [number, number, number] }> {
     return MATERIALS.map((m) => ({ id: m.id, key: m.key, name: m.name, color: m.color }));
   }
+}
+
+function numMeta(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 export { CHUNK };

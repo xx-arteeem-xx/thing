@@ -62,7 +62,7 @@ test('вода растекается и заполняет низину', () =>
 test('огонь поджигает дерево, оставляет дым и не может гореть вечно', () => {
   const w = emptyWorld(32, 32, 11);
   addFloor(w, 31);
-  w.grid.set(16, 30, MAT.WOOD);
+  for (let y = 26; y <= 30; y++) w.grid.set(16, y, MAT.WOOD);
   w.grid.set(15, 30, MAT.FIRE);
 
   let sawSmoke = false;
@@ -74,6 +74,24 @@ test('огонь поджигает дерево, оставляет дым и �
   assert.equal(count(w, MAT.WOOD), 0, 'дерево не сгорело');
   assert.ok(sawSmoke, 'при горении не появился дым');
   assert.ok(count(w, MAT.FIRE) < 3, 'огонь расплодился и не гаснет');
+});
+
+test('большой пожар оставляет пепел', () => {
+  const w = emptyWorld(32, 32, 12);
+  addFloor(w, 31);
+  fillRect(w, 8, 26, 22, 30, MAT.LEAVES);
+  w.grid.set(15, 25, MAT.FIRE);
+
+  let sawAsh = false;
+  for (let i = 0; i < 2000; i++) {
+    w.tickOnce();
+    if (count(w, MAT.ASH) > 0) {
+      sawAsh = true;
+      break;
+    }
+  }
+
+  assert.ok(sawAsh, 'после пожара не осталось пепла');
 });
 
 test('вода тушит огонь и превращается в пар', () => {
