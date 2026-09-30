@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>thing — мир</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot" id="link-dot"></span>
+        <span>thing</span>
+        <span class="muted" id="link-state">подключение…</span>
+      </div>
+      <div class="metrics" id="metrics"></div>
+      <div class="controls">
+        <button id="btn-pause" type="button">Пауза</button>
+        <button id="btn-step" type="button" class="debug-only">Тик</button>
+        <button id="btn-step60" type="button" class="debug-only">Секунда</button>
+        <button id="btn-save" type="button">Снапшот</button>
+        <button id="btn-load" type="button">Загрузить</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel palette">
+        <h2>Вещества</h2>
+        <div id="materials" class="materials"></div>
+        <h2>Кисть</h2>
+        <label class="row">
+          <span>радиус</span>
+          <input id="brush" type="range" min="1" max="24" value="4" />
+          <output id="brush-value">4</output>
+        </label>
+        <p class="hint">
+          ЛКМ — рисовать · ПКМ — стереть<br />
+          Shift+ЛКМ — нагреть · Ctrl+ЛКМ — охладить<br />
+          Средняя кнопка — взять вещество под курсором
+        </p>
+      </aside>
+
+      <section class="stage">
+        <canvas id="view" width="512" height="256"></canvas>
+        <div class="hover" id="hover">—</div>
+      </section>
+
+      <aside class="panel stats">
+        <h2>Мир</h2>
+        <dl id="world-stats"></dl>
+        <h2>Содержимое</h2>
+        <dl id="material-stats"></dl>
+      </aside>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

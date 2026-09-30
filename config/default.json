@@ -1,0 +1,23 @@
+{
+  "world": {
+    "width": 512,
+    "height": 256,
+    "seed": 20251001,
+    "ambient": 20,
+    "heatEveryTicks": 4,
+    "tickHz": 60
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8099,
+    "frameRingTicks": 180,
+    "maxTicksPerFrame": 4
+  },
+  "debug": {
+    "tools": true
+  },
+  "snapshot": {
+    "dir": "data/snapshots",
+    "intervalSec": 60
+  }
+}

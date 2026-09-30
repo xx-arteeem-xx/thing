@@ -1,0 +1,22 @@
+{
+  "name": "thing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thing — цифровое существо, которое живёт само по себе",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node packages/server/src/index.ts",
+    "dev": "node --watch packages/server/src/index.ts",
+    "shot": "node scripts/shot.ts",
+    "bench": "node scripts/bench.ts",
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
