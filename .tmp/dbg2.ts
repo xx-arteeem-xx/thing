@@ -1,30 +1,29 @@
+import { Creature } from '../packages/body/src/creature.ts';
+import { ReflexPolicy } from '../packages/brain-reflex/src/policy.ts';
 import { World } from '../packages/world/src/world.ts';
-import { MAT } from '../packages/world/src/materials.ts';
-
-function count(w: World, m: number) {
-  let n = 0;
-  for (const c of w.grid.mat) if (c === m) n++;
-  return n;
-}
-
-// дым
-const s = new World({ width: 32, height: 48, seed: 29, ambient: 20, heatEveryTicks: 4 });
-for (let x = 0; x < 32; x++) s.grid.set(x, 47, MAT.STONE);
-for (let y = 20; y <= 22; y++) for (let x = 14; x <= 17; x++) s.grid.set(x, y, MAT.SMOKE);
-for (const t of [1, 5, 20, 100, 300, 600, 900, 1200]) {
-  while (s.tick < t) s.tickOnce();
-  console.log(`дым на тике ${t}: ${count(s, MAT.SMOKE)}, dirtyChunks=${[0,1,2,3,4,5].map(c=>s.grid.isDirty(c)?1:0).join('')}`);
-}
-
-// огонь и дерево
-const f = new World({ width: 32, height: 32, seed: 11, ambient: 20, heatEveryTicks: 4 });
-for (let x = 0; x < 32; x++) f.grid.set(x, 31, MAT.STONE);
-f.grid.set(16, 30, MAT.WOOD);
-f.grid.set(15, 30, MAT.FIRE);
-console.log('--- огонь/дерево');
-for (let t = 1; t <= 900; t++) {
-  f.tickOnce();
-  if (t % 100 === 0 || t < 6) {
-    console.log(`тик ${t}: дерево=${count(f, MAT.WOOD)} огонь=${count(f, MAT.FIRE)} дым=${count(f, MAT.SMOKE)} T(дерево)=${f.grid.temp[30*32+16]} T(огонь)=${f.grid.temp[30*32+15]}`);
+import { generateTerrain } from '../packages/world/src/terrain.ts';
+import { SEG } from '../packages/body/src/body.ts';
+import { MATERIALS } from '../packages/world/src/materials.ts';
+const w = new World({ width: 512, height: 256, seed: 20251001, ambient: 20, heatEveryTicks: 4, lightEveryTicks: 16, dayLengthTicks: 4800, weather: false, maxWaterCells: 4500, journalFile: null });
+generateTerrain(w, { trees: 26 });
+const spot = w.findSurfaceSpot();
+const c = new Creature(spot.x, spot.y, 1, 0);
+const p = new ReflexPolicy();
+w.creature = c;
+let gait = 0;
+for (let t = 0; t < 12000; t++) {
+  const want = p.survival(w, c);
+  c.drinking = want.drinking; c.eating = want.eating;
+  gait += 0.16 * (want.dir !== 0 ? want.dir : 1);
+  c.walk(gait, w);
+  w.tickOnce();
+  p.act(w, c, t * 0.16);
+  if (t === 11999) {
+    const g = w.grid;
+    const at = (x: number, y: number) => MATERIALS[g.mat[Math.round(y)*g.w + Math.round(x)]]?.name ?? '?';
+    console.log('таз:', c.body.x[0].toFixed(1), c.body.y[0].toFixed(1), '| л.стопа:', c.body.x[12].toFixed(1), c.body.y[12].toFixed(1));
+    console.log('под стопой:', at(c.body.x[12], c.body.y[12]+1), '| на стопе:', at(c.body.x[12], c.body.y[12]));
+    console.log('голод:', c.physiology.hunger.toFixed(2), 'жажда:', c.physiology.thirst.toFixed(2));
+    console.log('survival:', JSON.stringify(p.survival(w, c)));
   }
 }

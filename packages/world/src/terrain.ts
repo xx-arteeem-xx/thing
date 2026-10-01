@@ -50,9 +50,97 @@ export function generateTerrain(w: World, opts: TerrainOptions = {}): void {
 
   growSurface(w, heights, seaLevel, treeCount);
   growAlgaeBeds(w, heights, seaLevel);
+  growMossAndReeds(w, heights, seaLevel);
+  makeLavaPockets(w, heights);
   seedFauna(w);
 
   g.touchAll();
+}
+
+/**
+ * Мох на камнях у воды и тростник по берегам.
+ * Просто украшение, но именно оно делает берег обжитым.
+ */
+function growMossAndReeds(w: World, heights: Int32Array, seaLevel: number): void {
+  const g = w.grid;
+  const rng = w.rng;
+  const W = g.w;
+  const H = g.h;
+
+  for (let x = 0; x < W; x++) {
+    for (let y = 1; y < H - 1; y++) {
+      const i = y * W + x;
+      const m = g.mat[i];
+      if (m !== MAT.STONE && m !== MAT.DIRT) continue;
+      if (g.mat[i - W] !== MAT.AIR) continue;
+
+      const nearWater =
+        g.mat[i + W] === MAT.WATER ||
+        (x > 0 && g.mat[i - 1] === MAT.WATER) ||
+        (x < W - 1 && g.mat[i + 1] === MAT.WATER);
+
+      if (nearWater && y > seaLevel - 3 && rng.chance(0.22)) {
+        g.set(x, y, MAT.REED);
+      } else if (rng.chance(0.04)) {
+        g.set(x, y, MAT.MOSS);
+      }
+    }
+  }
+
+  // Лианы свисают с деревьев.
+  for (let x = 1; x < W - 1; x++) {
+    for (let y = 1; y < H - 1; y++) {
+      const i = y * W + x;
+      if (g.mat[i] !== MAT.AIR) continue;
+      if (g.mat[i - W] !== MAT.LEAVES) continue;
+      if (!rng.chance(0.05)) continue;
+      let len = 1 + rng.nextInt(4);
+      for (let k = 0; k < len && y + k < H - 1; k++) {
+        if (g.mat[(y + k) * W + x] !== MAT.AIR) break;
+        g.set(x, y + k, MAT.VINE);
+      }
+    }
+  }
+}
+
+/**
+ * Лавовые озёра в глубине.
+ *
+ * Единственный по-настоящему горячий источник мира: возле него можно
+ * плавить руду, и он же — главная опасность под землёй.
+ */
+function makeLavaPockets(w: World, heights: Int32Array): void {
+  const g = w.grid;
+  const rng = w.rng;
+  const W = g.w;
+  const H = g.h;
+  const pools = 7 + rng.nextInt(6);
+
+  for (let p = 0; p < pools; p++) {
+    const cx = 20 + rng.nextInt(Math.max(1, W - 40));
+    const depth = heights[cx] + 40 + rng.nextInt(40);
+    const cy = Math.min(H - 6, depth);
+    if (cy <= heights[cx] + 20) continue;
+
+    const rx = 4 + rng.nextInt(7);
+    const ry = 2 + rng.nextInt(3);
+    for (let dy = -ry; dy <= ry; dy++) {
+      for (let dx = -rx; dx <= rx; dx++) {
+        if ((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) > 1) continue;
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x < 1 || y < 1 || x >= W - 1 || y >= H - 1) continue;
+        const i = y * W + x;
+        const m = g.mat[i];
+        if (m !== MAT.STONE && m !== MAT.DIRT && m !== MAT.CLAY && m !== MAT.GRAVEL) continue;
+        g.set(x, y, MAT.LAVA);
+        g.temp[i] = 1100 + rng.nextInt(200);
+      }
+    }
+    // Вокруг озера порода раскалена.
+    w.heat(cx, cy, rx + 5, 400);
+  }
+  w.thermalIdle = false;
 }
 
 /** Водоросли на дне водоёмов — основа водной жизни. */
@@ -117,7 +205,7 @@ function buildHeights(w: World): Int32Array {
     // Впадина слева (озеро с ледяной кромкой) и широкая низина справа (море).
     // Внимание: высота здесь — координата Y, поэтому впадина это прибавка.
     const basin = 34 * Math.max(0, 1 - u / 0.34);
-    const sea = 32 * Math.max(0, (u - 0.68) / 0.32);
+    const sea = 46 * Math.max(0, (u - 0.6) / 0.4);
     const hgt =
       base +
       basin +
@@ -175,10 +263,13 @@ function carveCaves(w: World, heights: Int32Array): void {
   for (let x = 0; x < W; x++) {
     const top = heights[x] + 12;
     for (let y = top; y < H - 2; y++) {
-      const n1 = valueNoise(x * 0.055, y * 0.085, 31);
-      const n2 = valueNoise(x * 0.13, y * 0.19, 57);
-      const v = n1 * 0.68 + n2 * 0.32;
-      if (v > 0.68) g.set(x, y, MAT.AIR);
+      // Крупные залы вместо «губки»: низкочастотный шум решает, будет ли
+      // здесь полость вообще, высокочастотный — только её край.
+      const hall = valueNoise(x * 0.022, y * 0.05, 31);
+      if (hall < 0.56) continue;
+      const edge = valueNoise(x * 0.09, y * 0.13, 57);
+      const v = hall * 0.7 + edge * 0.3;
+      if (v > 0.62) g.set(x, y, MAT.AIR);
     }
   }
 }
@@ -263,9 +354,11 @@ function fillWater(w: World, heights: Int32Array, seaLevel: number): void {
     const row = y * W;
     for (let x = 0; x < W; x++) {
       const i = row + x;
-      if (seen[i] === 1 && g.mat[i] === MAT.AIR) g.set(x, y, MAT.WATER);
+      if (seen[i] !== 1 || g.mat[i] !== MAT.AIR) continue;
+      g.set(x, y, MAT.WATER);
     }
   }
+
 }
 
 function makeBeach(w: World, heights: Int32Array, seaLevel: number): void {

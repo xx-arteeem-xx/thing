@@ -29,6 +29,8 @@ const world = new World({
   heatEveryTicks: cfg.world.heatEveryTicks,
   lightEveryTicks: cfg.world.lightEveryTicks,
   dayLengthTicks: cfg.world.dayLengthTicks,
+  maxWaterCells: cfg.world.maxWaterCells ?? 4500,
+  journalFile: null,
   weather: cfg.world.weather,
 });
 generateTerrain(world, { trees: 26 });

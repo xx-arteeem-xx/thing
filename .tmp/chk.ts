@@ -1,0 +1,11 @@
+import { Physiology } from '../packages/body/src/physiology.ts';
+const p = new Physiology();
+p.glucose = 8; p.glycogen = 600; p.hydration = 1;
+p.applyDamage(1, 45, 'cut'); p.applyDamage(4, 45, 'cut');
+console.log('тяжесть ран:', p.wounds.map(w=>w.severity.toFixed(2)).join(','), 'кровотечение:', p.wounds.map(w=>w.bleeding.toFixed(4)).join(','));
+const ctx = { ambient: 20, submerged: false, activity: 0.2, eating: false, drinking: false, insulation: 0 };
+for (let t = 0; t < 90000 && p.alive; t++) p.step(1/60, ctx);
+console.log('итог:', p.alive ? 'жив' : p.deathCause, '| кровь', p.blood.toFixed(2), '| время', (p.deathTick>0?'':''), '| t', 'секунд прошло ~1500');
+const p2 = new Physiology();
+p2.applyDamage(0, 60, 'blunt'); p2.applyDamage(0, 60, 'blunt'); p2.applyDamage(0, 60, 'blunt');
+console.log('рана головы:', p2.wounds.map(w=>w.severity.toFixed(2)).join(','), 'жив:', p2.alive, p2.deathCause ?? '');

@@ -233,3 +233,69 @@ dd {
 .debug-off .debug-only {
   display: none;
 }
+
+/* Наблюдатель смотрит, но не трогает: палитра и кисть скрыты,
+   пока в конфиге не включат отладочные инструменты. */
+.debug-off .palette {
+  display: none;
+}
+.debug-off .layout {
+  grid-template-columns: 1fr 320px;
+}
+
+.journal {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.disc {
+  color: var(--text);
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.disc .t {
+  color: var(--muted);
+  margin-right: 4px;
+}
+.disc.total {
+  color: var(--accent);
+  border-bottom: none;
+}
+
+
+/* Панель наблюдателя: немного кнопок, все — про жизнь, не про карту. */
+.observer .row {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0;
+  align-items: center;
+}
+.observer select,
+.observer input {
+  flex: 1;
+  min-width: 0;
+  background: #221f1c;
+  color: #e8e2d8;
+  border: 1px solid #3a352f;
+  border-radius: 4px;
+  padding: 3px 5px;
+  font: inherit;
+}
+.observer input[type='number'] {
+  flex: 0 0 52px;
+}
+.observer button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.observer button.danger {
+  width: 100%;
+  margin-top: 6px;
+  border-color: #6a3030;
+  color: #e8b8b8;
+}
+.observer .hint {
+  margin: 2px 0 6px;
+  line-height: 1.35;
+}

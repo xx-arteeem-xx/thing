@@ -97,6 +97,9 @@ test('большой пожар оставляет пепел', () => {
 test('вода тушит огонь и превращается в пар', () => {
   const w = emptyWorld(32, 32, 13);
   addFloor(w, 31);
+  // Огонь и вода заперты в ложбине: иначе вода растекается и не тушит.
+  w.grid.set(15, 30, MAT.STONE);
+  w.grid.set(18, 30, MAT.STONE);
   w.grid.set(16, 30, MAT.FIRE);
   w.grid.set(17, 30, MAT.WATER);
 

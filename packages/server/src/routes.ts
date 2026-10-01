@@ -24,10 +24,18 @@ export const ROUTES: readonly RouteDef[] = [
   { method: 'GET', path: '/api/meta', mutating: false, description: 'состояние симуляции и её темп' },
   { method: 'GET', path: '/api/frame', mutating: false, description: 'кадр мира: кейфрейм или патч изменившихся чанков' },
   { method: 'GET', path: '/api/materials', mutating: false, description: 'справочник веществ' },
+  { method: 'GET', path: '/api/species', mutating: false, description: 'справочник видов живности' },
+  { method: 'GET', path: '/api/journal', mutating: false, description: 'летопись первых событий мира' },
   { method: 'GET', path: '/api/stats', mutating: false, description: 'сколько чего в мире, горячие клетки' },
   { method: 'GET', path: '/api/snapshot.vvs', mutating: false, description: 'скачать текущий снапшот' },
 
   // Операционные: нужны для переезда, отладки и остановки жизни без потерь.
+  { method: 'GET', path: '/api/creature', mutating: false, description: 'состояние существа и вскрытие' },
+  { method: 'GET', path: '/api/thoughts', mutating: false, description: 'дневник мыслей существа' },
+  { method: 'POST', path: '/api/world/reset', mutating: true, description: 'вернуть мир к исходному состоянию (сила наблюдателя)' },
+  { method: 'POST', path: '/api/fauna/spawn', mutating: true, description: 'создать живых организмов (сила наблюдателя)' },
+  { method: 'POST', path: '/api/weather', mutating: true, description: 'сменить погоду (сила наблюдателя)' },
+  { method: 'POST', path: '/api/revive', mutating: true, description: 'вернуть существо к жизни (единственная сила наблюдателя)' },
   { method: 'POST', path: '/api/pause', mutating: true, description: 'остановить время' },
   { method: 'POST', path: '/api/resume', mutating: true, description: 'запустить время' },
   { method: 'POST', path: '/api/snapshot', mutating: true, description: 'сохранить снапшот на диск' },
@@ -37,6 +45,8 @@ export const ROUTES: readonly RouteDef[] = [
   { method: 'POST', path: '/api/paint', mutating: true, debugOnly: true, description: 'кисть наблюдателя (отладка)' },
   { method: 'POST', path: '/api/heat', mutating: true, debugOnly: true, description: 'нагрев области (отладка)' },
   { method: 'POST', path: '/api/step', mutating: true, debugOnly: true, description: 'один тик на паузе (отладка)' },
+  { method: 'POST', path: '/api/muscle', mutating: true, debugOnly: true, description: 'задать углы суставов (отладка)' },
+  { method: 'POST', path: '/api/walk', mutating: true, debugOnly: true, description: 'заставить идти (отладка)' },
 ];
 
 /**
@@ -44,12 +54,22 @@ export const ROUTES: readonly RouteDef[] = [
  * POST /api/revive появится в Ф1: воскрешение — единственная игровая сила
  * наблюдателя, и она обязана быть здесь явно.
  */
+/**
+ * Что вообще разрешено менять в мире.
+ *
+ * Первые пять — операции с временем и состоянием, последние три — силы
+ * наблюдателя: вернуть мир к исходному, создать живых, сменить погоду.
+ * Плюс воскрешение. Редактирования карты здесь нет и не будет.
+ */
 export const ALLOWED_MUTATING: readonly string[] = [
   'POST /api/revive',
   'POST /api/pause',
   'POST /api/resume',
   'POST /api/snapshot',
   'POST /api/load',
+  'POST /api/world/reset',
+  'POST /api/fauna/spawn',
+  'POST /api/weather',
 ];
 
 /**
@@ -60,6 +80,8 @@ export const DEBUG_MUTATING: readonly string[] = [
   'POST /api/paint',
   'POST /api/heat',
   'POST /api/step',
+  'POST /api/muscle',
+  'POST /api/walk',
 ];
 
 export function routeKey(r: { method: HttpMethod; path: string }): string {

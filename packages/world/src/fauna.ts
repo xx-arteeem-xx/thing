@@ -99,7 +99,7 @@ export const SPECIES_LIST: SpeciesDef[] = [
     maxAge: 42000,
     color: [214, 206, 196],
     size: 2,
-    maxCount: 70,
+    maxCount: 32,
   }),
   sp({
     id: SPECIES.DEER,
@@ -118,7 +118,7 @@ export const SPECIES_LIST: SpeciesDef[] = [
     maxAge: 66000,
     color: [156, 116, 72],
     size: 3,
-    maxCount: 18,
+    maxCount: 12,
   }),
   sp({
     id: SPECIES.WOLF,
@@ -156,7 +156,7 @@ export const SPECIES_LIST: SpeciesDef[] = [
     maxAge: 30000,
     color: [124, 178, 208],
     size: 2,
-    maxCount: 90,
+    maxCount: 45,
   }),
   sp({
     id: SPECIES.PIKE,
@@ -175,7 +175,7 @@ export const SPECIES_LIST: SpeciesDef[] = [
     maxAge: 45000,
     color: [86, 108, 94],
     size: 3,
-    maxCount: 25,
+    maxCount: 12,
   }),
 ];
 
@@ -259,8 +259,20 @@ export class Fauna {
   readonly act = new Uint8Array(MAX_ENTITIES);
   readonly dir = new Int8Array(MAX_ENTITIES);
   readonly timer = new Uint16Array(MAX_ENTITIES);
+  /**
+   * Отдельная задержка перед едой. Раньше её роль играл timer блуждания,
+   * а он почти всегда больше нуля — и звери не могли поесть вообще,
+   * буквально умирали с голоду на лугу.
+   */
+  readonly eatCd = new Uint16Array(MAX_ENTITIES);
   readonly targetX = new Float32Array(MAX_ENTITIES);
   readonly targetY = new Float32Array(MAX_ENTITIES);
+  /**
+   * Дом: место последней удачной кормёжки. Без него зверь уходил с луга
+   * наугад и уже не возвращался — энергия падала, и он умирал в пустыне.
+   */
+  readonly homeX = new Float32Array(MAX_ENTITIES);
+  readonly homeY = new Float32Array(MAX_ENTITIES);
   readonly targetKind = new Uint8Array(MAX_ENTITIES);
   readonly targetIndex = new Int16Array(MAX_ENTITIES);
   /** Счётчики рождений и смертей — для наблюдателя и тестов. */
@@ -272,6 +284,7 @@ export class Fauna {
   diedEnv = 0;
   drowned = 0;
   diedFire = 0;
+  diedStarved = 0;
   /** Кто получил урон от среды в этом тике (для разбора причин смерти). */
   readonly hurtEnv = new Uint8Array(MAX_ENTITIES);
 
@@ -290,6 +303,8 @@ export class Fauna {
     this.timer[i] = 0;
     this.targetKind[i] = 0;
     this.targetIndex[i] = -1;
+    this.homeX[i] = x;
+    this.homeY[i] = y;
     return i;
   }
 
@@ -309,6 +324,9 @@ export class Fauna {
     this.targetY[i] = this.targetY[last];
     this.targetKind[i] = this.targetKind[last];
     this.targetIndex[i] = this.targetIndex[last];
+    this.homeX[i] = this.homeX[last];
+    this.homeY[i] = this.homeY[last];
+    this.eatCd[i] = this.eatCd[last];
   }
 
   countOf(species: number): number {
@@ -328,6 +346,7 @@ export class Fauna {
 
       this.age[i]++;
       if (this.timer[i] > 0) this.timer[i]--;
+      if (this.eatCd[i] > 0) this.eatCd[i]--;
 
       // Экономика: энергия тратится медленно, но неумолимо. Мелкий зверь
       // должен есть примерно раз в минуту, иначе он не выживет.
@@ -336,7 +355,7 @@ export class Fauna {
         this.act[i] === ACT.SEEK_FOOD ||
         this.act[i] === ACT.HUNT ||
         this.act[i] === ACT.FLEE;
-      const drainEvery = moving ? 48 : 128;
+      const drainEvery = moving ? 80 : 200;
       if (w.tick % drainEvery === 0) {
         this.energy[i] = Math.max(0, this.energy[i] - 1);
       }
@@ -352,6 +371,7 @@ export class Fauna {
       if (this.hp[i] === 0 || this.age[i] > def.maxAge) {
         if (this.age[i] > def.maxAge) this.diedOld++;
         else if (this.hurtEnv[i] === 1) this.diedEnv++;
+        else if (this.energy[i] === 0) this.diedStarved++;
         this.die(w, i, def);
         continue;
       }
@@ -400,13 +420,17 @@ export class Fauna {
     }
 
     if (!def.aquatic && m === MAT.WATER) {
-      // Наземный зверь в воде тонет и гребёт наверх, к воздуху.
-      if ((w.tick & 7) === 0) {
+      // Тонет только тот, кто действительно под водой. Лужа от дождя,
+      // в которой зверь стоит по колено, — не повод тонуть, а раньше
+      // именно на этом вымирало всё зверьё в первые же секунды дождя.
+      const above = cy > 0 ? g.mat[(cy - 1) * g.w + cx] : MAT.AIR;
+      if (above !== MAT.WATER) return;
+      if ((w.tick & 15) === 0) {
         this.hp[i] = Math.max(0, this.hp[i] - 1);
         this.hurtEnv[i] = 1;
         this.drowned++;
       }
-      this.y[i] = Math.max(0, this.y[i] - 0.22);
+      this.y[i] = Math.max(0, this.y[i] - 0.34);
     }
   }
 
@@ -469,41 +493,32 @@ export class Fauna {
 
     // Растения: ищем съедобное в клетках вокруг.
     if (def.diet === DIET.PLANT) {
-      const r = Math.min(def.sight, 8);
-      for (let dy = -r; dy <= r; dy += 2) {
-        const ny = cy + dy;
-        if (ny < 0 || ny >= g.h) continue;
-        for (let dx = -r; dx <= r; dx += 2) {
-          const nx = cx + dx;
-          if (nx < 0 || nx >= g.w) continue;
-          const m = g.mat[ny * g.w + nx];
-          if (FOOD_PLANT[m] === 0) continue;
-          if (def.aquatic && m !== MAT.ALGAE) continue;
-          const dist = Math.abs(dx) + Math.abs(dy);
-          if (dist < foodDist) {
-            foodDist = dist;
-            foodX = nx;
-            foodY = ny;
-          }
-        }
+      const near = this.findFood(w, cx, cy, Math.min(def.sight, 10), 2, def.aquatic);
+      foodDist = near.dist;
+      foodX = near.x;
+      foodY = near.y;
+
+      // Голодный зверь обшаривает окрестности гораздо шире. Без этого он
+      // уходил с луга, тыкался наугад и тихо умирал от голода.
+      if (foodX < 0 && this.energy[i] < 170) {
+        // Шаг обязательно 2, а не 4: разреженный поиск пропускал пятна
+        // травы, и голодные звери умирали на лугу с травой вокруг.
+        const wide = this.findFood(w, cx, cy, 34, 2, def.aquatic);
+        foodDist = wide.dist;
+        foodX = wide.x;
+        foodY = wide.y;
       }
     } else {
       // Падаль тоже еда.
-      const r = Math.min(def.sight, 8);
-      for (let dy = -r; dy <= r; dy += 2) {
-        const ny = cy + dy;
-        if (ny < 0 || ny >= g.h) continue;
-        for (let dx = -r; dx <= r; dx += 2) {
-          const nx = cx + dx;
-          if (nx < 0 || nx >= g.w) continue;
-          if (FOOD_MEAT[g.mat[ny * g.w + nx]] === 0) continue;
-          const dist = Math.abs(dx) + Math.abs(dy);
-          if (dist < foodDist) {
-            foodDist = dist;
-            foodX = nx;
-            foodY = ny;
-          }
-        }
+      const near = this.findMeat(w, cx, cy, Math.min(def.sight, 8));
+      foodDist = near.dist;
+      foodX = near.x;
+      foodY = near.y;
+      if (foodX < 0 && this.energy[i] < 170) {
+        const wide = this.findMeat(w, cx, cy, 30);
+        foodDist = wide.dist;
+        foodX = wide.x;
+        foodY = wide.y;
       }
     }
 
@@ -541,12 +556,85 @@ export class Fauna {
       return;
     }
 
+    // Еды рядом нет, но зверь помнит, где кормился. Идём домой.
+    if (this.energy[i] < 210) {
+      const hx = this.homeX[i];
+      const hy = this.homeY[i];
+      if (Math.abs(hx - this.x[i]) + Math.abs(hy - this.y[i]) > 3) {
+        this.act[i] = ACT.SEEK_FOOD;
+        this.targetKind[i] = 3;
+        this.targetX[i] = hx;
+        this.targetY[i] = hy;
+        return;
+      }
+    }
+
     // Отдых не кормит: он только прекращает расход. Голодный зверь,
     // который не нашёл еды, всё равно погибнет — и это правильно.
     if (this.act[i] !== ACT.REST && this.energy[i] < 40) {
       this.act[i] = ACT.REST;
       this.targetKind[i] = 0;
     }
+  }
+
+  /** Ближайшая еда в квадрате радиуса r с шагом step. */
+  private findFood(
+    w: World,
+    cx: number,
+    cy: number,
+    r: number,
+    step: number,
+    aquatic: boolean,
+  ): { x: number; y: number; dist: number } {
+    const g = w.grid;
+    let bestX = -1;
+    let bestY = -1;
+    let best = Infinity;
+    for (let dy = -r; dy <= r; dy += step) {
+      const ny = cy + dy;
+      if (ny < 0 || ny >= g.h) continue;
+      const row = ny * g.w;
+      for (let dx = -r; dx <= r; dx += step) {
+        const nx = cx + dx;
+        if (nx < 0 || nx >= g.w) continue;
+        const m = g.mat[row + nx];
+        if (FOOD_PLANT[m] === 0) continue;
+        if (aquatic && m !== MAT.ALGAE) continue;
+        const d = Math.abs(dx) + Math.abs(dy);
+        if (d < best) {
+          best = d;
+          bestX = nx;
+          bestY = ny;
+        }
+      }
+    }
+    return { x: bestX, y: bestY, dist: best };
+  }
+
+  /** Ближайшая падаль. */
+  private findMeat(w: World, cx: number, cy: number, r: number): { x: number; y: number; dist: number } {
+    const g = w.grid;
+    let bestX = -1;
+    let bestY = -1;
+    let best = Infinity;
+    const step = r > 12 ? 2 : 1;
+    for (let dy = -r; dy <= r; dy += step) {
+      const ny = cy + dy;
+      if (ny < 0 || ny >= g.h) continue;
+      const row = ny * g.w;
+      for (let dx = -r; dx <= r; dx += step) {
+        const nx = cx + dx;
+        if (nx < 0 || nx >= g.w) continue;
+        if (FOOD_MEAT[g.mat[row + nx]] === 0) continue;
+        const d = Math.abs(dx) + Math.abs(dy);
+        if (d < best) {
+          best = d;
+          bestX = nx;
+          bestY = ny;
+        }
+      }
+    }
+    return { x: bestX, y: bestY, dist: best };
   }
 
   /** Движение и действия. */
@@ -630,7 +718,16 @@ export class Fauna {
 
     // В воде наземный зверь не тонет под собственной тяжестью: он гребёт
     // наверх (см. environment). Иначе гравитация съедала всё всплытие.
-    if (g.mat[cy * g.w + cx] === MAT.WATER) return;
+    const here = g.mat[cy * g.w + cx];
+    if (here === MAT.WATER) return;
+
+    // Зверь оказался внутри породы: его засыпало осыпью или залило, и грунт
+    // сомкнулся. Выбираемся наверх, иначе он стоит в толще земли навсегда
+    // и умирает с голоду при траве в пяти клетках.
+    if (WALKABLE[here] === 0) {
+      this.y[i] = Math.max(0, this.y[i] - 0.5);
+      return;
+    }
 
     // Наземные: гравитация.
     const supported = this.supported(w, cx, cy);
@@ -646,6 +743,14 @@ export class Fauna {
       // просто упадёт. Раньше требовалась опора, и звери не могли спуститься
       // с холма — стояли на месте и умирали с голоду.
       if (this.walkable(w, nx, cy)) {
+        // Но не туда, где внизу вода: упасть в воду означает утонуть,
+        // а выбираться зверь толком не умеет.
+        const below = cy + 1 < g.h ? g.mat[(cy + 1) * g.w + nx] : MAT.STONE;
+        if (below === MAT.WATER && this.supported(w, cx, cy)) {
+          this.dir[i] = -this.dir[i] as -1 | 1;
+          this.timer[i] = 20 + w.rng.nextInt(60);
+          return;
+        }
         this.x[i] += clamp(nx - this.x[i], -def.speed, def.speed);
         this.y[i] += clamp(cy - this.y[i], -def.speed, def.speed);
         return;
@@ -713,7 +818,7 @@ export class Fauna {
         if (this.hp[k] === 0) {
           this.die(w, k, od);
           this.eaten++;
-          this.energy[i] = Math.min(MAX_ENERGY, this.energy[i] + 70);
+          this.energy[i] = Math.min(MAX_ENERGY, this.energy[i] + 95);
           this.act[i] = ACT.WANDER;
           this.targetIndex[i] = -1;
         }
@@ -725,7 +830,7 @@ export class Fauna {
     // Еда: своя клетка и четыре соседних. Едим только когда голодны и
     // с передышкой — иначе стадо выедает луг за полминуты.
     if (this.energy[i] > 225) return;
-    if (this.timer[i] > 0) return;
+    if (this.eatCd[i] > 0) return;
 
     const meal = def.diet === DIET.PLANT ? FOOD_PLANT : FOOD_MEAT;
     const cells = [
@@ -746,8 +851,10 @@ export class Fauna {
       if (m === MAT.GRASS) g.set(nx, ny, MAT.DIRT);
       else g.set(nx, ny, MAT.AIR);
 
-      this.energy[i] = Math.min(MAX_ENERGY, this.energy[i] + (def.diet === DIET.MEAT ? 90 : 70));
-      this.timer[i] = 90;
+      this.energy[i] = Math.min(MAX_ENERGY, this.energy[i] + (def.diet === DIET.MEAT ? 150 : 115));
+      this.eatCd[i] = 90;
+      this.homeX[i] = nx;
+      this.homeY[i] = ny;
       this.act[i] = ACT.WANDER;
       return;
     }
@@ -783,7 +890,10 @@ export class Fauna {
       if (!ok) continue;
       this.energy[i] -= 70;
       const child = this.spawn(def.id, nx, ny, 110);
-      if (child >= 0) this.born++;
+      if (child >= 0) {
+        this.born++;
+        w.journal.note(w.tick, 'рождение', def.key, `впервые родилось потомство: ${def.name}`);
+      }
       return;
     }
   }
@@ -796,7 +906,9 @@ export class Fauna {
     if (cx >= 0 && cy >= 0 && cx < g.w && cy < g.h) {
       const j = cy * g.w + cx;
       const m = g.mat[j];
-      if (m === MAT.AIR || WALKABLE[m] === 1) g.set(cx, cy, MAT.MEAT);
+      // Крупный зверь оставляет не только мясо, но и кости с кожей.
+      const drop = def.size >= 3 && w.rng.chance(0.5) ? MAT.BONE : MAT.MEAT;
+      if (m === MAT.AIR || WALKABLE[m] === 1) g.set(cx, cy, drop);
       else {
         // Клетка занята — кладём рядом.
         if (cx + 1 < g.w && g.mat[j + 1] === MAT.AIR) g.set(cx + 1, cy, MAT.MEAT);
@@ -804,48 +916,112 @@ export class Fauna {
       }
     }
     this.died++;
-    void def;
+    const cause = this.hurtEnv[i] === 1 ? 'среда' : this.energy[i] === 0 ? 'голод' : 'раны';
+    w.journal.note(w.tick, 'смерть', `${def.key}:${cause}`, `первая смерть: ${def.name}, причина — ${cause}`);
     this.removeAt(i);
   }
 
-  /** Компактное представление для снапшота и кадра. */
+  /**
+   * Компактное представление для снапшота и кадра.
+   *
+   * Сохраняем ВСЁ состояние, включая энергию, возраст и таймеры: иначе
+   * восстановленный мир пошёл бы другим путём, чем непрерывный прогон.
+   * Кадр для наблюдателя берёт из этого же буфера только первые поля.
+   */
   toBytes(): Uint8Array {
-    const out = new Uint8Array(4 + this.count * 12);
+    const ENTITY_BYTES = 40;
+    const HEADER = 40;
+    const out = new Uint8Array(HEADER + this.count * ENTITY_BYTES);
     const view = new DataView(out.buffer);
     view.setUint16(0, this.count, true);
-    view.setUint16(2, this.born & 0xffff, true);
-    let o = 4;
+    view.setUint32(4, this.born, true);
+    view.setUint32(8, this.died, true);
+    view.setUint32(12, this.eaten, true);
+    view.setUint32(16, this.starved, true);
+    view.setUint32(20, this.diedOld, true);
+    view.setUint32(24, this.diedEnv, true);
+    view.setUint32(28, this.drowned, true);
+    view.setUint32(32, this.diedFire, true);
+
+    let o = HEADER;
     for (let i = 0; i < this.count; i++) {
       out[o] = this.species[i];
       view.setFloat32(o + 1, this.x[i], true);
       view.setFloat32(o + 5, this.y[i], true);
       out[o + 9] = this.hp[i];
-      out[o + 10] = this.act[i];
-      out[o + 11] = this.dir[i] & 0xff;
-      o += 12;
+      out[o + 10] = this.energy[i];
+      out[o + 11] = this.act[i];
+      view.setInt8(o + 12, this.dir[i]);
+      view.setUint32(o + 13, this.age[i], true);
+      view.setUint16(o + 17, this.timer[i], true);
+      view.setUint16(o + 19, this.eatCd[i], true);
+      out[o + 21] = this.targetKind[i];
+      view.setInt16(o + 22, this.targetIndex[i], true);
+      view.setFloat32(o + 24, this.targetX[i], true);
+      view.setFloat32(o + 28, this.targetY[i], true);
+      view.setFloat32(o + 32, this.homeX[i], true);
+      view.setFloat32(o + 36, this.homeY[i], true);
+      o += ENTITY_BYTES;
+    }
+    return out;
+  }
+
+  /**
+   * Компактная выдача для кадра наблюдателя: только то, что нужно нарисовать.
+   * Полное состояние (toBytes) втрое тяжелее и в кадре не нужно.
+   */
+  toFrameBytes(): Uint8Array {
+    const ENTITY_BYTES = 8;
+    const out = new Uint8Array(4 + this.count * ENTITY_BYTES);
+    const view = new DataView(out.buffer);
+    view.setUint16(0, this.count, true);
+    let o = 4;
+    for (let i = 0; i < this.count; i++) {
+      out[o] = this.species[i];
+      view.setUint16(o + 1, Math.max(0, Math.min(65535, Math.round(this.x[i]))), true);
+      view.setUint16(o + 3, Math.max(0, Math.min(65535, Math.round(this.y[i]))), true);
+      out[o + 5] = this.hp[i];
+      out[o + 6] = this.act[i];
+      view.setInt8(o + 7, this.dir[i]);
+      o += ENTITY_BYTES;
     }
     return out;
   }
 
   fromBytes(bytes: Uint8Array): void {
+    const ENTITY_BYTES = 40;
+    const HEADER = 40;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     this.count = Math.min(view.getUint16(0, true), MAX_ENTITIES);
-    this.born = view.getUint16(2, true);
-    let o = 4;
+    this.born = view.getUint32(4, true);
+    this.died = view.getUint32(8, true);
+    this.eaten = view.getUint32(12, true);
+    this.starved = view.getUint32(16, true);
+    this.diedOld = view.getUint32(20, true);
+    this.diedEnv = view.getUint32(24, true);
+    this.drowned = view.getUint32(28, true);
+    this.diedFire = view.getUint32(32, true);
+
+    let o = HEADER;
     for (let i = 0; i < this.count; i++) {
-      const s = bytes[o];
-      this.species[i] = s;
+      this.species[i] = bytes[o];
       this.x[i] = view.getFloat32(o + 1, true);
       this.y[i] = view.getFloat32(o + 5, true);
       this.hp[i] = bytes[o + 9];
-      this.energy[i] = 140;
-      this.age[i] = 0;
-      this.act[i] = bytes[o + 10];
-      this.dir[i] = (bytes[o + 11] << 24) >> 24;
-      this.timer[i] = 0;
-      this.targetKind[i] = 0;
-      this.targetIndex[i] = -1;
-      o += 12;
+      this.energy[i] = bytes[o + 10];
+      this.act[i] = bytes[o + 11];
+      this.dir[i] = view.getInt8(o + 12);
+      this.age[i] = view.getUint32(o + 13, true);
+      this.timer[i] = view.getUint16(o + 17, true);
+      this.eatCd[i] = view.getUint16(o + 19, true);
+      this.targetKind[i] = bytes[o + 21];
+      this.targetIndex[i] = view.getInt16(o + 22, true);
+      this.targetX[i] = view.getFloat32(o + 24, true);
+      this.targetY[i] = view.getFloat32(o + 28, true);
+      this.homeX[i] = view.getFloat32(o + 32, true);
+      this.homeY[i] = view.getFloat32(o + 36, true);
+      this.hurtEnv[i] = 0;
+      o += ENTITY_BYTES;
     }
   }
 }

@@ -7,12 +7,21 @@
  */
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { Clock, RateMeter } from '../../core/src/clock.ts';
 import { World } from '../../world/src/world.ts';
 import { generateTerrain } from '../../world/src/terrain.ts';
 import { MATERIALS } from '../../world/src/materials.ts';
+import { SPECIES_LIST } from '../../world/src/fauna.ts';
+import { WEATHER, WEATHER_NAME } from '../../world/src/sim.ts';
+import { Creature } from '../../body/src/creature.ts';
+import { ReflexPolicy } from '../../brain-reflex/src/policy.ts';
+import { Reward } from '../../brain-reflex/src/reward.ts';
+import { Learner } from '../../brain-reflex/src/learn.ts';
+import { WeightGuard } from '../../brain-reflex/src/guard.ts';
+import { describe, sense, think } from '../../brain-language/src/interoception.ts';
+import { SEGMENTS } from '../../body/src/body.ts';
 import { loadConfig, ROOT } from './config.ts';
 import type { Config } from './config.ts';
 import { encodeKeyframe, encodeNoChange, encodePatch } from './frame.ts';
@@ -46,8 +55,9 @@ const cfg: Config = loadConfig();
 const clock = new Clock(1000 / cfg.world.tickHz, cfg.server.maxTicksPerFrame);
 const meter = new RateMeter(2000);
 
-const sim: Sim = {
-  world: new World({
+/** Собрать мир по конфигу: тем же составом, что и при запуске. */
+function makeWorld(): World {
+  return new World({
     width: cfg.world.width,
     height: cfg.world.height,
     seed: cfg.world.seed,
@@ -56,7 +66,13 @@ const sim: Sim = {
     lightEveryTicks: cfg.world.lightEveryTicks,
     dayLengthTicks: cfg.world.dayLengthTicks,
     weather: cfg.world.weather,
-  }),
+    maxWaterCells: cfg.world.maxWaterCells,
+    journalFile: resolve(ROOT, cfg.journal.file),
+  });
+}
+
+const sim: Sim = {
+  world: makeWorld(),
   changedBuf: new Int32Array(0),
   ring: [],
   ringStartTick: 0,
@@ -74,7 +90,36 @@ function resetScratch(): void {
   sim.stamp = 0;
 }
 
-generateTerrain(sim.world);
+/**
+ * Просыпаться, а не рождаться заново.
+ *
+ * Если в папке снапшотов что-то есть, мир продолжается с последнего
+ * сохранения. Для существа перезапуск сервера — это сон, а не смерть
+ * (см. §14 плана). Переменная THING_FRESH=1 заставляет начать заново.
+ */
+let policy = new ReflexPolicy();
+let reward = new Reward();
+let learner = new Learner();
+let guard = new WeightGuard();
+const freshRequested = process.env.THING_FRESH === '1';
+let resumedFrom: string | null = null;
+
+if (!freshRequested) {
+  try {
+    const loaded = loadLatestSnapshot();
+    if (loaded !== null) resumedFrom = loaded.file;
+  } catch (err) {
+    console.error('[thing] снапшот не прочитан, начинаю новый мир:', (err as Error).message);
+  }
+}
+
+if (resumedFrom === null) {
+  generateTerrain(sim.world);
+  // Рождаем там, где есть и еда, и вода: иначе первая же жизнь кончается
+  // жаждой, и учиться ему не на чем.
+  const spot = sim.world.findSurfaceSpot(undefined, { nearWater: 40 });
+  sim.world.creature = new Creature(spot.x, spot.y, 1, 0);
+}
 resetScratch();
 
 // ---------------------------------------------------------------- цикл времени
@@ -106,12 +151,47 @@ function advanceTime(): void {
   lastFrameMs = now;
 
   for (let k = 0; k < steps; k++) {
+    // Отладочный привод: пока мозга нет, существом можно поуправлять руками.
+    const c = sim.world.creature;
+    if (c !== null && c.canAct) {
+      // Жизненные действия: пить, есть, искать. Они задают направление
+      // шага, а позу ведёт рефлекторный контур.
+      const want = policy.survival(sim.world, c);
+      c.drinking = want.drinking;
+      c.eating = want.eating;
+      if (want.dir !== 0) {
+        gaitPhase += 0.16 * want.dir;
+        c.walk(gaitPhase);
+      } else {
+        gaitPhase += 0.16;
+        c.walk(gaitPhase);
+      }
+      if (walking !== 0) {
+        gaitPhase += 0.16 * walking;
+        c.walk(gaitPhase);
+      } else {
+        // Рефлекторный контур: датчики → врождённые рефлексы и сеть → мышцы.
+        policy.act(sim.world, c, sim.world.tick * 0.16);
+        if (sim.world.tick % 30 === 0) recordThought(sim.world, c);
+        // Награда считается здесь же и тут же идёт в обучение: никакого
+        // отдельного «сеанса тренировки» — существо учится, пока живёт.
+        reward.setAge(sim.world.tick - c.bornTick);
+        const parts = reward.step(c, policy.sensors, 0, sim.world.journal.total, 1 / 60);
+        if (learner.observe(policy, parts.total)) {
+          guard.observe(policy, learner.lastMeanReward);
+        }
+      }
+    }
     sim.world.tickOnce();
     recordFrame();
     clock.markTick(performance.now());
     meter.push(performance.now());
   }
 }
+
+/** Направление отладочной ходьбы: -1 влево, 0 стоять, 1 вправо. */
+let walking = 0;
+let gaitPhase = 0;
 
 let lastFrameMs = performance.now();
 const loop = setInterval(advanceTime, 4);
@@ -148,6 +228,9 @@ function rotateSnapshots(dir: string, keep = 120): void {
 }
 
 function saveSnapshot(tag = ''): { file: string; bytes: number } {
+  // Мозг кладём в тело перед сохранением: он часть существа.
+  const alive = sim.world.creature;
+  if (alive !== null) alive.brain = policy.toBytes();
   const dir = snapshotDir();
   const name = `snap-${String(sim.world.tick).padStart(10, '0')}${tag}.vvs`;
   const file = join(dir, name);
@@ -168,6 +251,9 @@ function loadLatestSnapshot(): { file: string; tick: number } | null {
 function loadSnapshotFile(file: string): void {
   const buf = readFileSync(file);
   sim.world = World.fromSnapshot(buf);
+  // Подхватываем мозг, если он был сохранён вместе с телом.
+  const brain = sim.world.creature?.brain ?? null;
+  if (brain !== null) policy = ReflexPolicy.fromBytes(brain);
   sim.ring = [];
   sim.ringStartTick = sim.world.tick;
   resetScratch();
@@ -238,6 +324,8 @@ on('GET', '/api/meta', (_req, res) => {
     droppedTicks: clock.dropped,
     thermalIdle: sim.world.thermalIdle,
     skyLight: sim.world.skyLight,
+    creatureAlive: sim.world.creature?.alive ?? false,
+    creatureGeneration: sim.world.creature?.generation ?? 0,
     timeOfDay: Number(sim.world.timeOfDay.toFixed(4)),
     dayLengthTicks: cfg.world.dayLengthTicks,
     weather: sim.world.weather.kind,
@@ -260,6 +348,273 @@ on('GET', '/api/materials', (_req, res) => {
   });
 });
 
+on('POST', '/api/muscle', async (req, res) => {
+  const c = sim.world.creature;
+  if (c === null || !c.canAct) {
+    sendJson(res, { ok: false, error: 'существо не может двигаться' }, 409);
+    return;
+  }
+  const body = await readJson(req);
+  const strength = intFrom(body.strength, -1);
+  if (strength >= 0) c.body.muscleStrength = Math.min(1, strength / 100);
+  const joints = Array.isArray(body.joints) ? body.joints : [];
+  for (const j of joints) {
+    const o = (j ?? {}) as Record<string, unknown>;
+    c.body.setJoint(intFrom(o.index, -1), Number(o.angle ?? 0));
+  }
+  sendJson(res, { ok: true, angles: Array.from(c.body.targetAngle) });
+});
+
+on('POST', '/api/walk', (req, res, url) => {
+  const c = sim.world.creature;
+  if (c === null || !c.canAct) {
+    sendJson(res, { ok: false, error: 'существо не может двигаться' }, 409);
+    return;
+  }
+  const dir = url.searchParams.get('dir');
+  walking = dir === 'stop' ? 0 : dir === '-1' ? -1 : 1;
+  sendJson(res, { ok: true, walking });
+});
+
+on('GET', '/api/creature', (_req, res) => {
+  const c = sim.world.creature;
+  if (c === null) {
+    sendJson(res, { ok: false, error: 'существа нет' }, 404);
+    return;
+  }
+  sendJson(res, {
+    ok: true,
+    alive: c.alive,
+    generation: c.generation,
+    bornTick: c.bornTick,
+    deathTick: c.deathTick,
+    ageTicks: (c.alive ? sim.world.tick : c.deathTick) - c.bornTick,
+    physiology: {
+      blood: c.physiology.blood,
+      oxygen: c.physiology.oxygen,
+      glucose: c.physiology.glucose,
+      hydration: c.physiology.hydration,
+      coreTemp: c.physiology.coreTemp,
+      heartRate: c.physiology.heartRate,
+      pain: c.physiology.painLevel,
+      fear: c.physiology.fear,
+      conscious: c.physiology.conscious,
+      hunger: c.physiology.hunger,
+      thirst: c.physiology.thirst,
+      fatigue: c.physiology.fatigue,
+      summary: c.physiology.summary(),
+    },
+    body: c.frameState(),
+    // Сегменты нужны интерфейсу, чтобы нарисовать существо целиком.
+    segments: SEGMENTS.map((seg) => ({
+      x: Number(c.body.x[seg.id].toFixed(2)),
+      y: Number(c.body.y[seg.id].toFixed(2)),
+      name: seg.key,
+    })),
+    // Мысль существа по-английски: то, ради чего всё затевалось.
+    thought: think(sense(sim.world, c)),
+    innerState: describe(sense(sim.world, c)),
+    muscles: Array.from(c.body.targetAngle).map((a) => Number(a.toFixed(3))),
+    walking,
+    reflex: policy.lastReflex,
+    policySteps: policy.steps,
+    brain: {
+      parameters: ReflexPolicy.parameterCount(),
+      updates: learner.updates,
+      baseline: Number(learner.baselineValue.toFixed(3)),
+      lastMeanReward: Number(learner.lastMeanReward.toFixed(3)),
+      rewardStd: Number(learner.lastStd.toFixed(3)),
+      visitedStates: reward.visitedStates,
+      totalReward: Number(reward.total.toFixed(1)),
+      discoveries: reward.discoveries,
+      rollbacks: guard.rollbacks,
+      noveltyScale: Number(reward.noveltyScale.toFixed(3)),
+      safetyScale: Number(reward.safetyScale.toFixed(3)),
+      bestReward: Number.isFinite(guard.bestReward) ? Number(guard.bestReward.toFixed(3)) : null,
+    },
+    autopsy: c.alive ? null : c.autopsy(),
+  });
+});
+
+/**
+ * Воскрешение.
+ *
+ * Единственная игровая сила наблюдателя и единственное место во всём
+ * проекте, где существо возвращается к жизни. Живёт в сервере, за
+ * пределами мира: из симуляции к этой функции пути нет (инвариант И7).
+ */
+on('POST', '/api/revive', (_req, res) => {
+  const previous = sim.world.creature;
+  const autopsy = previous !== null && !previous.alive ? previous.autopsy() : null;
+  const generation = previous === null ? 1 : previous.generation + (previous.alive ? 0 : 1);
+  const spot = sim.world.findSurfaceSpot(undefined, { nearWater: 40 });
+  sim.world.creature = new Creature(spot.x, spot.y, generation, sim.world.tick);
+  // Знание переходит в новую жизнь, память о ней — нет: веса остаются,
+  // а накопленное за эпизод забывается.
+  learner.reset();
+  sim.ring.length = 0;
+  sim.ringStartTick = sim.world.tick;
+  sendJson(res, {
+    ok: true,
+    generation,
+    spot,
+    previousLife: autopsy,
+    tick: sim.world.tick,
+  });
+});
+
+/**
+ * Дневник: каждая новая мысль существа с тиком и состоянием тела.
+ *
+ * Это одновременно и «история жизни» для наблюдателя, и заготовка
+ * датасета для языкового контура из Ф3: чтобы существо научилось
+ * говорить о себе, нужны тысячи строк «состояние → слова».
+ */
+const thoughtsFile = join(snapshotDir(), '..', 'thoughts.jsonl');
+let lastThought = '';
+let thoughtCount = 0;
+
+function recordThought(world: World, c: Creature): void {
+  const s = sense(world, c);
+  const text = think(s);
+  if (text === lastThought) return;
+  lastThought = text;
+  thoughtCount++;
+  const line = JSON.stringify({
+    tick: world.tick,
+    generation: c.generation,
+    alive: c.alive,
+    thought: text,
+    state: describe(s),
+    facts: s,
+    drives: {
+      hunger: Number(c.physiology.hunger.toFixed(3)),
+      thirst: Number(c.physiology.thirst.toFixed(3)),
+      fatigue: Number(c.physiology.fatigue.toFixed(3)),
+      pain: Number(c.physiology.painLevel.toFixed(3)),
+      fear: Number(c.physiology.fear.toFixed(3)),
+    },
+  });
+  try {
+    appendFileSync(thoughtsFile, line + '\n');
+  } catch {
+    /* дневник не критичен для жизни мира */
+  }
+  if (world.journal.total > 0) return;
+}
+
+on('GET', '/api/thoughts', (req, res, url) => {
+  const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit') ?? 60)));
+  if (!existsSync(thoughtsFile)) {
+    sendJson(res, { ok: true, total: thoughtCount, lines: [] });
+    return;
+  }
+  const all = readFileSync(thoughtsFile, 'utf8').split('\n').filter((l: string) => l.trim().length > 0);
+  const lines = all.slice(-limit).map((l: string) => {
+    try {
+      return JSON.parse(l) as Record<string, unknown>;
+    } catch {
+      return { raw: l };
+    }
+  });
+  sendJson(res, { ok: true, total: all.length, lines });
+});
+
+/**
+ * Силы наблюдателя.
+ *
+ * Их ровно четыре, и все — про жизнь, а не про карту: создать существо
+ * взамен погибшего, вернуть мир к исходному состоянию, создать живых
+ * организмов и сменить погоду. Редактировать рельеф и вещества нельзя:
+ * мир должен жить сам.
+ */
+
+// Вернуть мир к исходному состоянию: тот же seed, тот же рельеф.
+on('POST', '/api/world/reset', (_req, res) => {
+  sim.world = makeWorld();
+  generateTerrain(sim.world);
+  const spot = sim.world.findSurfaceSpot(undefined, { nearWater: 40 });
+  sim.world.creature = new Creature(spot.x, spot.y, 1, 0);
+  policy = new ReflexPolicy();
+  reward = new Reward();
+  learner = new Learner();
+  guard = new WeightGuard();
+  lastThought = '';
+  sim.ring.length = 0;
+  sim.ringStartTick = 0;
+  try {
+    writeFileSync(thoughtsFile, '');
+  } catch {
+    /* дневник можно начать заново и позже */
+  }
+  sendJson(res, { ok: true, tick: 0, spot });
+});
+
+// Создать живых организмов: только тех, что уже есть в мире.
+on('POST', '/api/fauna/spawn', async (req, res) => {
+  const body = await readJson(req);
+  const key = String(body.species ?? 'rabbit');
+  const def = SPECIES_LIST.find((sp) => sp.key === key);
+  if (!def) {
+    sendJson(res, { ok: false, error: `неизвестный вид: ${key}` }, 400);
+    return;
+  }
+  const count = Math.max(1, Math.min(20, Number(body.count ?? 1)));
+  const spot = sim.world.findSurfaceSpot(undefined, def.aquatic ? { nearWater: 60 } : {});
+  let made = 0;
+  for (let k = 0; k < count; k++) {
+    // Расселяем вокруг выбранного места, чтобы они не слиплись в точку.
+    const x = Math.max(1, Math.min(sim.world.grid.w - 2, spot.x + Math.round((k - count / 2) * 2)));
+    const y = spot.y + (def.aquatic ? 3 : 4);
+    if (sim.world.fauna.spawn(def.id, x, y, 160) >= 0) made++;
+  }
+  sendJson(res, { ok: true, species: def.key, name: def.name, spawned: made, at: spot });
+});
+
+// Сменить погоду. Время выбирает мир, наблюдатель задаёт только вид.
+on('POST', '/api/weather', async (req, res) => {
+  const body = await readJson(req);
+  const key = String(body.kind ?? 'clear');
+  const kinds: Record<string, number> = { clear: WEATHER.CLEAR, rain: WEATHER.RAIN, snow: WEATHER.SNOW, storm: WEATHER.STORM };
+  const kind = kinds[key];
+  if (kind === undefined) {
+    sendJson(res, { ok: false, error: `неизвестная погода: ${key}` }, 400);
+    return;
+  }
+  const weather = sim.world.weather;
+  weather.kind = kind;
+  weather.until = sim.world.tick + Math.max(600, Number(body.ticks ?? 2400));
+  sendJson(res, { ok: true, kind, name: WEATHER_NAME[kind], until: weather.until });
+});
+
+on('GET', '/api/species', (_req, res) => {
+  sendJson(res, {
+    species: SPECIES_LIST.map((s) => ({
+      id: s.id,
+      key: s.key,
+      name: s.name,
+      color: s.color,
+      size: s.size,
+      aquatic: s.aquatic,
+      aggression: s.aggression,
+      diet: s.diet,
+      maxCount: s.maxCount,
+    })),
+    alive: SPECIES_LIST.map((s) => ({
+      id: s.id,
+      key: s.key,
+      count: sim.world.fauna.countOf(s.id),
+    })),
+  });
+});
+
+on('GET', '/api/journal', (_req, res) => {
+  sendJson(res, {
+    total: sim.world.journal.total,
+    discoveries: sim.world.journal.recent(80),
+  });
+});
+
 on('GET', '/api/stats', (_req, res) => {
   const s = sim.world.stats();
   const byMaterial: Record<string, number> = {};
@@ -273,7 +628,22 @@ on('GET', '/api/stats', (_req, res) => {
     thermalIdle: s.thermalIdle,
     skyLight: s.skyLight,
     weather: s.weather,
+    fauna: s.fauna,
+    discoveries: sim.world.journal.total,
     byMaterial,
+    bySpecies: (() => {
+      const out: Record<string, number> = {};
+      for (const sp of SPECIES_LIST) out[sp.key] = sim.world.fauna.countOf(sp.id);
+      return out;
+    })(),
+    faunaEvents: {
+      born: sim.world.fauna.born,
+      died: sim.world.fauna.died,
+      eaten: sim.world.fauna.eaten,
+      drowned: sim.world.fauna.drowned,
+      burned: sim.world.fauna.diedFire,
+      old: sim.world.fauna.diedOld,
+    },
   });
 });
 
@@ -290,7 +660,7 @@ on('GET', '/api/frame', (_req, res, url) => {
   }
 
   if (since >= world.tick) {
-    send(res, 200, 'application/octet-stream', encodeNoChange(world.tick, world.grid.w, world.grid.h));
+    send(res, 200, 'application/octet-stream', encodeNoChange(world));
     return;
   }
 
@@ -310,7 +680,7 @@ on('GET', '/api/frame', (_req, res, url) => {
   }
 
   if (list.length === 0) {
-    send(res, 200, 'application/octet-stream', encodeNoChange(world.tick, world.grid.w, world.grid.h));
+    send(res, 200, 'application/octet-stream', encodeNoChange(world));
     return;
   }
 

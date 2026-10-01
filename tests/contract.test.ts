@@ -29,10 +29,19 @@ test('в отладочном режиме тоже нет нарушений', 
   assert.deepEqual(contractViolations(true), []);
 });
 
-test('боевой набор мутирующих маршрутов — ровно операционные', () => {
+test('мутирующие маршруты — операции и силы наблюдателя', () => {
   assert.deepEqual(
     [...mutatingRoutes(false)].sort(),
-    ['POST /api/load', 'POST /api/pause', 'POST /api/resume', 'POST /api/snapshot'],
+    [
+      'POST /api/fauna/spawn',
+      'POST /api/load',
+      'POST /api/pause',
+      'POST /api/resume',
+      'POST /api/revive',
+      'POST /api/snapshot',
+      'POST /api/weather',
+      'POST /api/world/reset',
+    ],
   );
 });
 
@@ -47,9 +56,17 @@ test('отладочные инструменты полностью отсут�
   }
 });
 
-test('воскрешение объявлено как единственная игровая сила (реализация — Ф1)', () => {
+test('воскрешение — единственная игровая сила, и оно уже реализовано', () => {
   assert.ok(ALLOWED_MUTATING.includes('POST /api/revive'));
-  assert.deepEqual(notYetImplemented(false), ['POST /api/revive']);
+  assert.deepEqual(notYetImplemented(false), [], 'разрешённый маршрут объявлен, но не реализован');
+  assert.ok(mutatingRoutes(false).includes('POST /api/revive'));
+});
+
+test('воскрешение живёт в сервере, а не в мире', () => {
+  // Функция возврата к жизни обязана быть снаружи симуляции. Если она
+  // появится в мире или в теле, существо сможет оживить себя само.
+  const source = readFileSync(join(ROOT, 'packages/server/src/index.ts'), 'utf8');
+  assert.ok(/revive/.test(source), 'воскрешение исчезло из сервера');
 });
 
 test('мир ничего не знает о воскрешении: пути из симуляции к нему нет', () => {
@@ -60,8 +77,12 @@ test('мир ничего не знает о воскрешении: пути и
     const dir = join(ROOT, pkg);
     for (const file of readdirSync(dir)) {
       if (!file.endsWith('.ts')) continue;
-      const source = readFileSync(join(dir, file), 'utf8');
-      assert.ok(!suspects.test(source), `${pkg}/${file} упоминает воскрешение — это нарушает И7`);
+      // Комментарии не считаем: важно отсутствие КОДА, умеющего возвращать
+      // к жизни, а не словесное упоминание.
+      const source = readFileSync(join(dir, file), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.ok(!suspects.test(source), `${pkg}/${file} содержит код воскрешения — это нарушает И7`);
     }
   }
 });

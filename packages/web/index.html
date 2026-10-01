@@ -24,7 +24,7 @@
     </header>
 
     <main class="layout">
-      <aside class="panel palette">
+      <aside class="panel palette debug-only">
         <h2>Вещества</h2>
         <div id="materials" class="materials"></div>
         <h2>Кисть</h2>
@@ -46,8 +46,39 @@
       </section>
 
       <aside class="panel stats">
+        <h2>Наблюдатель</h2>
+        <div class="observer">
+          <p class="hint">Ты смотришь. Мир живёт сам: карту не изменить.</p>
+          <button id="btn-revive" type="button">Создать существо</button>
+          <div class="row">
+            <select id="spawn-species"></select>
+            <input id="spawn-count" type="number" min="1" max="20" value="3" />
+            <button id="btn-spawn" type="button">Создать живых</button>
+          </div>
+          <div class="row">
+            <select id="weather-kind">
+              <option value="clear">ясно</option>
+              <option value="rain">дождь</option>
+              <option value="snow">снег</option>
+              <option value="storm">гроза</option>
+            </select>
+            <button id="btn-weather" type="button">Сменить погоду</button>
+          </div>
+          <button id="btn-reset" type="button" class="danger">Вернуть мир к исходному</button>
+          <div id="observer-status" class="hint">—</div>
+        </div>
+        <h2>Существо</h2>
+        <div id="creature" class="creature">—</div>
+        <h2>Мысли</h2>
+        <div id="thoughts" class="journal">—</div>
         <h2>Мир</h2>
         <dl id="world-stats"></dl>
+        <h2>Открытия</h2>
+        <div id="journal" class="journal">—</div>
+        <h2>Живность</h2>
+        <dl id="fauna-stats"></dl>
+        <h2>Судьбы</h2>
+        <dl id="fauna-events"></dl>
         <h2>Содержимое</h2>
         <dl id="material-stats"></dl>
       </aside>

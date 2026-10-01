@@ -15,6 +15,15 @@ const SKY_NIGHT = [10, 13, 26];
 const SKY_DAY = [92, 138, 198];
 
 const state = {
+  species: [],
+  bySpeciesId: new Map(),
+  fauna: [],
+  /** Существо: тело, физиология и мысли. Приходит отдельным запросом. */
+  creature: null,
+  /** Текущий свет неба: без него в чанках замерзает день и ночь. */
+  skyLight: 255,
+  /** Уровень поверхности по столбцам: выше него — небо. */
+  surfaceY: null,
   width: 0,
   height: 0,
   mat: null,
@@ -42,6 +51,9 @@ const el = {
   metrics: document.getElementById('metrics'),
   worldStats: document.getElementById('world-stats'),
   materialStats: document.getElementById('material-stats'),
+  journal: document.getElementById('journal'),
+  faunaStats: document.getElementById('fauna-stats'),
+  faunaEvents: document.getElementById('fauna-events'),
   hover: document.getElementById('hover'),
   linkDot: document.getElementById('link-dot'),
   linkState: document.getElementById('link-state'),
@@ -89,7 +101,26 @@ async function decodeFrame(buffer) {
 
   let payload = new Uint8Array(buffer, 20, payloadLen);
   if (compression === 1) payload = await inflate(payload);
-  return { type, tick, width, height, payload };
+
+  // Сначала идёт живность, за ней — данные мира
+  const faunaCount = payload[0] | (payload[1] << 8);
+  const faunaBytes = 4 + faunaCount * 8;
+  const fauna = [];
+  if (faunaCount > 0) {
+    const fv = new DataView(payload.buffer, payload.byteOffset, faunaBytes);
+    for (let k = 0; k < faunaCount; k++) {
+      const o = 4 + k * 8;
+      fauna.push({
+        species: payload[o],
+        x: fv.getUint16(o + 1, true),
+        y: fv.getUint16(o + 3, true),
+        hp: payload[o + 5],
+        act: payload[o + 6],
+      });
+    }
+  }
+
+  return { type, tick, width, height, payload: payload.subarray(faunaBytes), fauna };
 }
 
 function allocate(width, height) {
@@ -189,21 +220,55 @@ function render() {
   state.needsRedraw = false;
 
   const { width, mat, temp, light, byId } = state;
-  const n = width * state.height;
+  const height = state.height;
+  const n = width * height;
+
+  // Уровень поверхности: спящие чанки не обновляют свет, и без этого
+  // на экране получались прямоугольники чужого времени суток.
+  if (!state.surfaceY || state.surfaceY.length !== width) {
+    state.surfaceY = new Int16Array(width);
+  }
+  const surfaceY = state.surfaceY;
+  for (let x = 0; x < width; x++) {
+    let y = 0;
+    while (y < height && mat[y * width + x] === 0) y++;
+    surfaceY[x] = y;
+  }
+  const sky = state.skyLight;
 
   for (let i = 0; i < n; i++) {
     const m = mat[i];
-    const lp = light[i] / 255;
+    let l = light[i];
 
     let r;
     let g;
     let b;
 
     if (m === 0) {
-      r = SKY_NIGHT[0] + (SKY_DAY[0] - SKY_NIGHT[0]) * lp;
-      g = SKY_NIGHT[1] + (SKY_DAY[1] - SKY_NIGHT[1]) * lp;
-      b = SKY_NIGHT[2] + (SKY_DAY[2] - SKY_NIGHT[2]) * lp;
+      // Небо над поверхностью всегда текущее; воздух в пещерах — это
+      // темнота под землёй, и небом его красить нельзя.
+      const x = i % width;
+      const y = (i / width) | 0;
+      const lp = l / 255;
+      if (y < surfaceY[x]) {
+        l = sky;
+        const lps = l / 255;
+        r = SKY_NIGHT[0] + (SKY_DAY[0] - SKY_NIGHT[0]) * lps;
+        g = SKY_NIGHT[1] + (SKY_DAY[1] - SKY_NIGHT[1]) * lps;
+        b = SKY_NIGHT[2] + (SKY_DAY[2] - SKY_NIGHT[2]) * lps;
+      } else {
+        const k = 0.25 + 0.75 * lp;
+        r = 26 * k;
+        g = 22 * k;
+        b = 20 * k;
+      }
     } else {
+      const x = i % width;
+      const y = (i / width) | 0;
+      const depth = y - surfaceY[x];
+      const fromSky = depth <= 0 ? sky : depth < 3 ? sky * (1 - depth * 0.35) : 0;
+      if (fromSky > l) l = fromSky;
+      const lp = l / 255;
       const def = byId.get(m);
       const base = def ? def.color : [255, 0, 255];
       const variance = def ? def.variance : 0;
@@ -234,6 +299,81 @@ function render() {
   }
 
   ctx.putImageData(imageData, 0, 0);
+  drawFauna();
+  drawCreature();
+}
+
+/**
+ * Существо рисуется иначе, чем звери: его надо узнавать мгновенно.
+ *
+ * Скелет из шестнадцати точек, тёплый контур вокруг тела и стрелка над
+ * головой. Звери — маленькие квадратики, существо — крупнее и с меткой,
+ * чтобы не приходилось искать его глазами по всему миру.
+ */
+/** Живность рисуется поверх мира: организмы не клетки, а существа. */
+function drawFauna() {
+  for (const f of state.fauna) {
+    const def = state.bySpeciesId.get(f.species);
+    if (!def) continue;
+    const size = def.size;
+    const half = (size / 2) | 0;
+    const fx = Math.round(f.x);
+    const fy = Math.round(f.y);
+    // Тёмная подложка: отделяет зверя от фона. Ночью ничего не
+    // подсвечиваем — в темноте и должно быть темно.
+    ctx.fillStyle = 'rgba(20, 16, 14, 0.8)';
+    ctx.fillRect(fx - half - 1, fy - half - 1, size + 2, size + 2);
+    ctx.fillStyle = `rgb(${def.color[0]},${def.color[1]},${def.color[2]})`;
+    ctx.fillRect(fx - half, fy - half, size, size);
+    // глазик: сразу видно, что это зверь, а не пиксель мира
+    ctx.fillStyle = '#101014';
+    ctx.fillRect(fx + half - 1, fy - half, 1, 1);
+  }
+}
+
+function drawCreature() {
+  const c = state.creature;
+  if (!c || !c.body) return;
+
+  const x = Math.round(c.body.x);
+  const y = Math.round(c.body.y);
+  const alive = c.alive;
+  const pts = c.segments || [];
+  if (pts.length === 0) return;
+
+  // Тело: тёмный контур и светлые точки сегментов. Без свечения —
+  // оно забивало карту и мешало смотреть на мир.
+  ctx.strokeStyle = alive ? 'rgba(30, 22, 18, 0.9)' : 'rgba(60, 24, 24, 0.9)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (const seg of pts) {
+    const px = Math.round(seg.x);
+    const py = Math.round(seg.y);
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + 0.1, py + 0.1);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = alive ? '#ffe9c0' : '#b06a6a';
+  for (const seg of pts) ctx.fillRect(Math.round(seg.x) - 1, Math.round(seg.y) - 1, 3, 3);
+
+  // Голова ярче: видно, куда оно смотрит.
+  if (pts.length > 3) {
+    ctx.fillStyle = alive ? '#ffffff' : '#d08080';
+    ctx.beginPath();
+    ctx.arc(Math.round(pts[3].x), Math.round(pts[3].y), 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Небольшая метка над головой: найти взглядом, но не отвлекать.
+  const top = Math.min(...pts.map((p) => p.y)) - 6;
+  ctx.fillStyle = alive ? 'rgba(255, 212, 121, 0.85)' : 'rgba(192, 80, 80, 0.85)';
+  ctx.beginPath();
+  ctx.moveTo(x, top + 3);
+  ctx.lineTo(x - 3, top - 2);
+  ctx.lineTo(x + 3, top - 2);
+  ctx.closePath();
+  ctx.fill();
 }
 
 // --------------------------------------------------------------- получение
@@ -248,8 +388,9 @@ async function pump() {
     else if (frame.type === FT.PATCH) {
       if (!applyPatch(frame)) state.since = -1;
     }
+    state.fauna = frame.fauna;
 
-    if (frame.type !== FT.NOCHANGE) state.needsRedraw = true;
+    state.needsRedraw = true;
     state.since = frame.tick;
     setLink(true, 'живёт');
   } catch (err) {
@@ -261,7 +402,8 @@ async function pump() {
 }
 
 function clockText(timeOfDay) {
-  const totalMinutes = Math.floor(timeOfDay * 24 * 60);
+  // Тик 0 — полдень, поэтому к фазе суток прибавляем 12 часов.
+  const totalMinutes = Math.floor(((timeOfDay * 24 + 12) % 24) * 60);
   const hh = String(Math.floor(totalMinutes / 60)).padStart(2, '0');
   const mm = String(totalMinutes % 60).padStart(2, '0');
   return `${hh}:${mm}`;
@@ -272,6 +414,10 @@ async function refreshMeta() {
     const meta = await (await fetch('/api/meta')).json();
     state.paused = meta.paused;
     state.debugTools = meta.debugTools;
+    if (typeof meta.skyLight === 'number') {
+      if (state.skyLight !== meta.skyLight) state.needsRedraw = true;
+      state.skyLight = meta.skyLight;
+    }
     document.body.classList.toggle('debug-off', !meta.debugTools);
     el.btnPause.textContent = meta.paused ? 'Продолжить' : 'Пауза';
     el.metrics.innerHTML =
@@ -286,6 +432,25 @@ async function refreshMeta() {
     /* связь уже показана в pump */
   } finally {
     setTimeout(refreshMeta, 1000);
+  }
+}
+
+async function refreshJournal() {
+  try {
+    const data = await (await fetch('/api/journal')).json();
+    const items = data.discoveries
+      .slice(0, 14)
+      .map((d) => {
+        const mins = Math.floor(d.tick / 3600);
+        return `<div class="disc"><span class="t">${mins}м</span> ${d.text}</div>`;
+      })
+      .join('');
+    el.journal.innerHTML =
+      `<div class="disc total">всего: ${data.total}</div>` + (items || '<div class="disc">пока пусто</div>');
+  } catch {
+    /* следующий тик догонит */
+  } finally {
+    setTimeout(refreshJournal, 3000);
   }
 }
 
@@ -310,6 +475,21 @@ async function refreshStats() {
       .map(({ m, n }) => `<dt>${m.name}</dt><dd>${n.toLocaleString('ru-RU')}</dd>`)
       .join('');
     el.materialStats.innerHTML = rows;
+
+    const faunaRows = state.species
+      .map((sp) => ({ sp, n: stats.bySpecies?.[sp.key] ?? 0 }))
+      .sort((a, b) => b.n - a.n)
+      .map(({ sp, n }) => `<dt>${sp.name}</dt><dd>${n}</dd>`)
+      .join('');
+    el.faunaStats.innerHTML = faunaRows || '<dt>пусто</dt><dd>0</dd>';
+    const ev = stats.faunaEvents ?? {};
+    el.faunaEvents.innerHTML =
+      `<dt>родилось</dt><dd>${ev.born ?? 0}</dd>` +
+      `<dt>погибло</dt><dd>${ev.died ?? 0}</dd>` +
+      `<dt>съедено</dt><dd>${ev.eaten ?? 0}</dd>` +
+      `<dt>утонуло</dt><dd>${ev.drowned ?? 0}</dd>` +
+      `<dt>сгорело</dt><dd>${ev.burned ?? 0}</dd>` +
+      `<dt>от старости</dt><dd>${ev.old ?? 0}</dd>`;
 
     for (const node of el.materials.children) {
       const id = Number(node.dataset.id);
@@ -358,7 +538,149 @@ async function sendPoints() {
     state.inFlight = false;
   }
 }
+/** Лента мыслей: то, ради чего всё затевалось. */
+const thoughtLog = [];
+
+/** Панель существа: состояние, мысль и обучение. */
+function updateCreaturePanel() {
+  const box = document.getElementById('creature');
+  if (!box) return;
+  const c = state.creature;
+  if (!c) {
+    box.innerHTML = '<b>существа нет</b>';
+    return;
+  }
+  const p = c.physiology || {};
+  const brain = c.brain || {};
+  const bar = (v, good) => {
+    const w = Math.max(0, Math.min(100, Math.round(v * 100)));
+    const color = good ? '#7fc47f' : '#d08a5a';
+    return `<span style="display:inline-block;width:60px;height:6px;background:#2a2622;vertical-align:middle"><span style="display:block;width:${w}%;height:6px;background:${color}"></span></span>`;
+  };
+  box.innerHTML =
+    `<div class="cthought${c.alive ? '' : ' cdead'}">«${c.thought}»</div>` +
+    `<div class="crow"><b>${c.alive ? 'живо' : 'мертво'}</b> · поколение ${c.generation}</div>` +
+    `<div class="crow">кровь ${(p.blood ?? 0).toFixed(1)} л ${bar((p.blood ?? 0) / 5, (p.blood ?? 0) > 3)}</div>` +
+    `<div class="crow">кислород ${Math.round(p.oxygen ?? 0)}% ${bar((p.oxygen ?? 0) / 100, (p.oxygen ?? 0) > 80)}</div>` +
+    `<div class="crow">вода ${Math.round((1 - (p.thirst ?? 0)) * 100)}% ${bar(1 - (p.thirst ?? 0), (p.thirst ?? 0) < 0.5)}</div>` +
+    `<div class="crow">еда ${Math.round((1 - (p.hunger ?? 0)) * 100)}% ${bar(1 - (p.hunger ?? 0), (p.hunger ?? 0) < 0.6)}</div>` +
+    `<div class="crow">темп ${(p.coreTemp ?? 0).toFixed(1)}° · пульс ${Math.round(p.heartRate ?? 0)}</div>` +
+    `<div class="crow" style="opacity:.65;font-size:11px">${c.innerState || ''}</div>` +
+    `<div class="crow" style="opacity:.65;font-size:11px;margin-top:4px">обучений ${brain.updates ?? 0} · откатов ${brain.rollbacks ?? 0} · состояний ${brain.visitedStates ?? 0}</div>`;
+}
+
+// ------------------------------------------------------- силы наблюдателя
+
+/**
+ * Наблюдатель смотрит и распоряжается только жизнью: создать существо,
+ * населить мир, сменить погоду, вернуть всё к началу. Карту не трогает —
+ * редактирования мира здесь нет.
+ */
+async function observerAction(url, body, label) {
+  const status = document.getElementById('observer-status');
+  if (status) status.textContent = `${label}…`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: body === null ? '{}' : JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (status) {
+      status.textContent = d.ok
+        ? `${label}: ${d.spawned ?? d.name ?? d.generation ?? 'готово'}`
+        : `${label}: ${d.error}`;
+    }
+    await refreshMeta();
+    await pollCreature();
+  } catch (err) {
+    if (status) status.textContent = `${label}: не вышло (${err.message})`;
+  }
+}
+
+function wireObserver() {
+  const revive = document.getElementById('btn-revive');
+  const spawn = document.getElementById('btn-spawn');
+  const weather = document.getElementById('btn-weather');
+  const reset = document.getElementById('btn-reset');
+  const species = document.getElementById('spawn-species');
+  const count = document.getElementById('spawn-count');
+  const kind = document.getElementById('weather-kind');
+  if (!revive) return;
+
+  // Список видов берём у мира: наблюдатель населяет, но не выдумывает.
+  fetch('/api/species')
+    .then((r) => r.json())
+    .then((d) => {
+      if (!species) return;
+      species.innerHTML = (d.species || [])
+        .map((sp) => `<option value="${sp.key}">${sp.name}</option>`)
+        .join('');
+    })
+    .catch(() => {});
+
+  revive.addEventListener('click', () => {
+    const c = state.creature;
+    const label = c && c.alive ? 'Существо уже живо — создаю заново' : 'Создаю существо';
+    observerAction('/api/revive', {}, label);
+  });
+  spawn?.addEventListener('click', () =>
+    observerAction(
+      '/api/fauna/spawn',
+      { species: species?.value, count: Number(count?.value ?? 1) },
+      'Создаю живых',
+    ),
+  );
+  weather?.addEventListener('click', () =>
+    observerAction('/api/weather', { kind: kind?.value }, 'Меняю погоду'),
+  );
+  reset?.addEventListener('click', () => {
+    if (!confirm('Вернуть мир к исходному состоянию? Всё живое начнётся заново.')) return;
+    observerAction('/api/world/reset', {}, 'Возвращаю мир к исходному');
+  });
+}
+
 setInterval(sendPoints, 33);
+
+/** Существо приходит отдельным запросом: в бинарном кадре его нет. */
+async function pollCreature() {
+  try {
+    const res = await fetch('/api/creature');
+    if (!res.ok) {
+      state.creature = null;
+      return;
+    }
+    const d = await res.json();
+    state.creature = {
+      body: d.body,
+      alive: d.alive,
+      segments: d.segments || [],
+      thought: d.thought || '',
+      generation: d.generation,
+      physiology: d.physiology,
+      brain: d.brain,
+    };
+    state.needsRedraw = true;
+    // Пишем в ленту, только когда мысль сменилась: иначе она забьёт всё.
+    if (d.thought && thoughtLog[thoughtLog.length - 1] !== d.thought) {
+      thoughtLog.push(d.thought);
+      if (thoughtLog.length > 40) thoughtLog.shift();
+      const tl = document.getElementById('thoughts');
+      if (tl) {
+        tl.innerHTML = thoughtLog
+          .slice()
+          .reverse()
+          .map((t, i) => `<div style="opacity:${i === 0 ? 1 : Math.max(0.25, 1 - i * 0.06)}">${t}</div>`)
+          .join('');
+      }
+    }
+    updateCreaturePanel();
+  } catch {
+    /* следующий опрос покажет потерю связи */
+  }
+}
+setInterval(pollCreature, 500);
+pollCreature();
 
 function canvasToWorld(ev) {
   const rect = el.canvas.getBoundingClientRect();
@@ -475,15 +797,24 @@ function frameLoop() {
 }
 
 async function start() {
-  const list = await (await fetch('/api/materials')).json();
+  const [list, speciesList] = await Promise.all([
+    fetch('/api/materials').then((r) => r.json()),
+    fetch('/api/species').then((r) => r.json()),
+  ]);
   state.materials = list.materials;
   state.byId = new Map(state.materials.map((m) => [m.id, m]));
+  state.species = speciesList.species;
+  state.bySpeciesId = new Map(state.species.map((sp) => [sp.id, sp]));
   state.brush = Number(el.brush.value);
   buildPalette();
   pump();
   refreshMeta();
   refreshStats();
+  refreshJournal();
   requestAnimationFrame(frameLoop);
 }
 
 start().catch((err) => setLink(false, `ошибка запуска: ${err.message}`));
+
+// Силы наблюдателя подключаются сразу при загрузке страницы.
+wireObserver();

@@ -106,7 +106,7 @@ test('мокрая земля превращается в грязь', () => {
   fillRect(w, 0, 20, 31, 23, MAT.DIRT);
   fillRect(w, 10, 16, 20, 19, MAT.WATER);
 
-  run(w, 800);
+  run(w, 3000);
 
   assert.ok(count(w, MAT.MUD) > 0, 'грязь так и не появилась');
 });

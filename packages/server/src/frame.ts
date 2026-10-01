@@ -17,7 +17,7 @@ import { CHUNK } from '../../world/src/grid.ts';
 import type { World } from '../../world/src/world.ts';
 
 export const FRAME_MAGIC = 0x31524656; // 'VFR1'
-export const FRAME_VERSION = 1;
+export const FRAME_VERSION = 2;
 export const FRAME_HEADER_BYTES = 20;
 
 export const FT = {
@@ -62,17 +62,32 @@ function wrap(
   height: number,
   payload: Buffer,
   compress: boolean,
+  fauna: Buffer,
 ): Buffer {
+  // Живность идёт перед данными мира: её размер известен из первых четырёх
+  // байт, поэтому разбор кадра остаётся однозначным.
+  const withFauna = Buffer.concat([fauna, payload]);
   if (compress) {
-    const packed = deflateSync(payload, { level: 3 });
+    const packed = deflateSync(withFauna, { level: 3 });
     return Buffer.concat([header(type, COMP.ZLIB, tick, width, height, packed.length), packed]);
   }
-  return Buffer.concat([header(type, COMP.RAW, tick, width, height, payload.length), payload]);
+  return Buffer.concat([header(type, COMP.RAW, tick, width, height, withFauna.length), withFauna]);
+}
+
+/** Живность в кадре: u16 count + по 8 байт на организм. */
+export function faunaBlock(w: World): Buffer {
+  return Buffer.from(w.fauna.toFrameBytes());
 }
 
 /** «Ничего не изменилось» — самый частый ответ в спокойном мире. */
-export function encodeNoChange(tick: number, width: number, height: number): Buffer {
-  return header(FT.NOCHANGE, COMP.RAW, tick, width, height, 0);
+export function encodeNoChange(w: World): Buffer {
+  // Даже когда мир не изменился, живность могла перейти в соседнюю клетку:
+  // без блока фауны звери замирали бы на месте в спокойные минуты.
+  const fauna = faunaBlock(w);
+  return Buffer.concat([
+    header(FT.NOCHANGE, COMP.RAW, w.tick, w.grid.w, w.grid.h, fauna.length),
+    fauna,
+  ]);
 }
 
 export function encodeKeyframe(w: World, compress = true): Buffer {
@@ -89,7 +104,7 @@ export function encodeKeyframe(w: World, compress = true): Buffer {
   }
   payload.set(g.light, o);
 
-  return wrap(FT.KEYFRAME, w.tick, g.w, g.h, payload, compress);
+  return wrap(FT.KEYFRAME, w.tick, g.w, g.h, payload, compress, faunaBlock(w));
 }
 
 export function encodePatch(w: World, chunks: readonly number[], compress = true): Buffer {
@@ -152,5 +167,5 @@ export function encodePatch(w: World, chunks: readonly number[], compress = true
     }
   }
 
-  return wrap(FT.PATCH, w.tick, g.w, g.h, payload, compress);
+  return wrap(FT.PATCH, w.tick, g.w, g.h, payload, compress, faunaBlock(w));
 }

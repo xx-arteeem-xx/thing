@@ -59,25 +59,43 @@ export const WEATHER_NAME: Record<number, string> = {
 const SKY_MIN = 34;
 const SKY_MAX = 255;
 
+/** Частота мира по умолчанию: 60 тиков в секунду. */
+export const TICK_HZ = 60;
+
 /** Полный тик мира. */
 export function stepWorld(w: World): void {
+
   const g = w.grid;
   g.beginTick();
 
   // Свет считаем ДО материалов: от него зависит, растёт ли трава и прорастает
   // ли семя. Если считать его после, то на самом первом тике весь мир будет
   // «тёмным», растения решат, что расти некуда, и их чанки уснут навсегда.
-  if (w.tick % w.cfg.lightEveryTicks === 0) stepLight(w);
+  // Свет обновляем четвертями: полный проход по 131 072 клеткам давал
+  // пик в 5 мс, из-за которого мир дёргался. Теперь каждые 4 тика
+  // пересчитывается четверть столбцов, а полный круг занимает 16 тиков.
+  const lightParts = 4;
+  const lightStep = Math.max(1, Math.round(w.cfg.lightEveryTicks / lightParts));
+  if (w.tick === 0) {
+    // На старте свет считаем целиком. Иначе часть столбцов остаётся с нулём,
+    // и растущие в них растения решают, что света нет, и засыпают навсегда.
+    stepLight(w, 0, 1);
+  } else if (w.tick % lightStep === 0) {
+    stepLight(w, ((w.tick / lightStep) | 0) % lightParts, lightParts);
+  }
 
   const moveBit = (w.tick & 1) === 0 ? FLAG.MOVE_A : FLAG.MOVE_B;
   updateMaterials(w, moveBit);
 
   if (w.tick % w.cfg.heatEveryTicks === 0) stepHeat(w);
+  if (w.tick % SLOW_EVERY === 0) stepSlow(w);
   if (w.cfg.weather) stepWeather(w);
 
   // Живность ходит каждый тик: движение должно быть плавным, а восприятие
   // внутри устроено реже (см. Fauna.step).
   w.fauna.step(w);
+  // Существо живёт в том же времени, что и мир.
+  if (w.creature !== null) w.creature.step(w, 1 / TICK_HZ, 0);
 
   w.tick++;
 }
@@ -214,10 +232,25 @@ function updateCell(w: World, x: number, y: number, i: number, moveBit: number):
   }
 }
 
+/**
+ * Отметить превращение в летописи. Ключ — пара «было > стало»: именно такие
+ * пары и есть открытия мира, и именно их потом будет искать любопытство.
+ */
+function noteChange(w: World, from: number, to: number): void {
+  if (from === to) return;
+  w.journal.note(
+    w.tick,
+    'превращение',
+    `${MATERIALS[from].key}>${MATERIALS[to].key}`,
+    `${MATERIALS[from].name} → ${MATERIALS[to].name}`,
+  );
+}
+
 /** Поджечь клетку, запомнив, останется ли после неё пепел. */
 function ignite(w: World, x: number, y: number, i: number, ashChance: number): void {
   const g = w.grid;
   const ash = w.rng.chance(ashChance);
+  noteChange(w, g.mat[i], MAT.FIRE);
   g.set(x, y, MAT.FIRE);
   g.flags[i] = ash ? FLAG.BURNING : 0;
 }
@@ -242,6 +275,7 @@ function react(w: World, x: number, y: number, i: number): void {
     if (aux[i] === 0) aux[i] = (life * (0.6 + rng.nextFloat() * 0.8)) | 0;
     aux[i]--;
     if (aux[i] === 0) {
+      noteChange(w, m, LIFETIME_INTO[m]);
       g.set(x, y, LIFETIME_INTO[m]);
       return;
     }
@@ -253,29 +287,103 @@ function react(w: World, x: number, y: number, i: number): void {
     return;
   }
 
+  // Лава, встретив воду, застывает обсидианом, а вода уходит паром.
+  if (m === MAT.LAVA) {
+    for (let k = 0; k < 4; k++) {
+      const nx = x + (k === 0 ? 1 : k === 1 ? -1 : 0);
+      const ny = y + (k === 2 ? 1 : k === 3 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= w.grid.w || ny >= w.grid.h) continue;
+      const j = ny * w.grid.w + nx;
+      if (g.mat[j] !== MAT.WATER) continue;
+      noteChange(w, MAT.LAVA, MAT.OBSIDIAN);
+      g.set(x, y, MAT.OBSIDIAN);
+      noteChange(w, MAT.WATER, MAT.STEAM);
+      g.set(nx, ny, MAT.STEAM);
+      return;
+    }
+  }
+
   const melt = MELT_TEMP[m];
   if (melt !== NO_TEMP && t >= melt && rng.chance(MELT_CHANCE[m])) {
+    noteChange(w, m, MELT_INTO[m]);
     g.set(x, y, MELT_INTO[m]);
     return;
   }
 
   const freeze = FREEZE_TEMP[m];
   if (freeze !== NO_FREEZE && t <= freeze && rng.chance(FREEZE_CHANCE[m])) {
+    noteChange(w, m, FREEZE_INTO[m]);
     g.set(x, y, FREEZE_INTO[m]);
     return;
   }
 
   // Мокрый грунт превращается в грязь, а грязь на свету высыхает.
-  // Образование грязи нарочно медленное: если оно идёт быстро, дождь
-  // размывает всю почву, грязь сползает по склонам, засыпает луг,
-  // и трава вымирает за несколько минут.
-  if ((w.tick & 3) === 0 && (m === MAT.DIRT || m === MAT.MUD)) {
-    if (m === MAT.DIRT) {
-      if (rng.chance(0.002) && hasNeighbor(w, x, y, MAT.WATER)) g.set(x, y, MAT.MUD);
-    } else if (g.light[i] > 140 && rng.chance(0.02)) {
-      g.set(x, y, MAT.DIRT);
+  // Это медленный процесс, и он вынесен в stepSlow: внутри обхода клеток
+  // он не работал бы, потому что уснувший чанк не пересчитывается, а ждать
+  // события рядом можно вечно.
+}
+
+/**
+ * Медленные превращения: раз в SLOW_EVERY тиков по всей сетке.
+ *
+ * Здесь живут процессы, которые зависят от соседства двух неподвижных
+ * веществ (мокрая земля → грязь, грязь на свету → земля). Внутри обычного
+ * обхода они не работают: уснувший чанк не пересчитывается, а повода
+ * проснуться у него нет — вода уже утекла, и всё замерло навсегда.
+ *
+ * Стоимость: полный проход раз в 64 тика — около 0.05 мс на тик.
+ */
+export const SLOW_EVERY = 64;
+
+export function stepSlow(w: World): void {
+  const g = w.grid;
+  const rng = w.rng;
+  const W = g.w;
+  const H = g.h;
+  const mat = g.mat;
+  const light = g.light;
+  const temp = g.temp;
+  let waterCells = 0;
+
+  for (let y = 1; y < H - 1; y++) {
+    const row = y * W;
+    for (let x = 1; x < W - 1; x++) {
+      const i = row + x;
+      const m = mat[i];
+
+      if (m === MAT.WATER || m === MAT.ICE || m === MAT.SNOW || m === MAT.STEAM) {
+        waterCells++;
+        // Круговорот воды: нагретая на свету вода испаряется и возвращается
+        // дождём. Без испарения дождь копил воду без предела и затапливал луг —
+        // трава оказывалась под водой, и зверью было не до чего дотянуться.
+        if (m === MAT.WATER && light[i] > 80 && temp[i] > 8 && rng.chance(0.0009)) {
+          noteChange(w, MAT.WATER, MAT.STEAM);
+          g.set(x, y, MAT.STEAM);
+          continue;
+        }
+      }
+
+      if (m === MAT.DIRT) {
+        if (!rng.chance(0.02)) continue;
+        if (
+          mat[i - 1] === MAT.WATER ||
+          mat[i + 1] === MAT.WATER ||
+          mat[i - W] === MAT.WATER ||
+          mat[i + W] === MAT.WATER
+        ) {
+          noteChange(w, MAT.DIRT, MAT.MUD);
+          g.set(x, y, MAT.MUD);
+        }
+      } else if (m === MAT.MUD) {
+        if (light[i] > 140 && rng.chance(0.06)) {
+          noteChange(w, MAT.MUD, MAT.DIRT);
+          g.set(x, y, MAT.DIRT);
+        }
+      }
     }
   }
+
+  w.waterCells = waterCells;
 }
 
 function hasNeighbor(w: World, x: number, y: number, mat: number): boolean {
@@ -315,6 +423,7 @@ function reactFire(w: World, x: number, y: number, i: number): void {
       const j = ny * W + nx;
       const nm = g.mat[j];
       if (nm === MAT.WATER || nm === MAT.SNOW || nm === MAT.ICE) {
+        noteChange(w, MAT.FIRE, MAT.STEAM);
         g.set(x, y, MAT.STEAM);
         if (rng.chance(0.5)) g.set(nx, ny, nm === MAT.ICE ? MAT.WATER : MAT.STEAM);
         return;
@@ -328,8 +437,16 @@ function reactFire(w: World, x: number, y: number, i: number): void {
 
   if (g.aux[i] === 0) {
     const ash = (g.flags[i] & FLAG.BURNING) !== 0;
-    if (ash) g.set(x, y, MAT.ASH);
-    else g.set(x, y, rng.chance(0.65) ? MAT.SMOKE : MAT.AIR);
+    if (ash) {
+      noteChange(w, MAT.FIRE, MAT.ASH);
+      g.set(x, y, MAT.ASH);
+    } else {
+      // Часть перегоревшего дерева остаётся древесным углём — лучшим топливом.
+      const roll = rng.nextFloat();
+      const into = roll < 0.1 ? MAT.CHARCOAL : roll < 0.65 ? MAT.SMOKE : MAT.AIR;
+      noteChange(w, MAT.FIRE, into);
+      g.set(x, y, into);
+    }
   }
 }
 
@@ -545,7 +662,7 @@ export function stepHeat(w: World): void {
  * Свет нужен не для красоты: от него зависит, растёт ли трава, прорастает ли
  * семя и где селятся грибы. Поэтому он часть симуляции, а не эффект отрисовки.
  */
-export function stepLight(w: World): void {
+export function stepLight(w: World, part = 0, parts = 1): void {
   const g = w.grid;
   const W = g.w;
   const H = g.h;
@@ -553,7 +670,11 @@ export function stepLight(w: World): void {
   const mat = g.mat;
   const sky = w.skyLight;
 
-  for (let x = 0; x < W; x++) {
+  const span = Math.ceil(W / parts);
+  const xStart = part * span;
+  const xEnd = Math.min(W, xStart + span);
+
+  for (let x = xStart; x < xEnd; x++) {
     let l = sky;
     for (let y = 0; y < H; y++) {
       const i = y * W + x;
@@ -568,11 +689,13 @@ export function stepLight(w: World): void {
 
   for (let y = 0; y < H; y++) {
     const row = y * W;
-    for (let x = 1; x < W; x++) {
+    const from = Math.max(1, xStart);
+    const to = Math.min(W - 1, xEnd);
+    for (let x = from; x < to; x++) {
       const v = light[row + x - 1] - 14;
       if (v > light[row + x]) light[row + x] = v;
     }
-    for (let x = W - 2; x >= 0; x--) {
+    for (let x = to - 1; x >= from; x--) {
       const v = light[row + x + 1] - 14;
       if (v > light[row + x]) light[row + x] = v;
     }
@@ -581,7 +704,7 @@ export function stepLight(w: World): void {
   for (let y = H - 2; y >= 0; y--) {
     const row = y * W;
     const up = row + W;
-    for (let x = 0; x < W; x++) {
+    for (let x = xStart; x < xEnd; x++) {
       const v = light[up + x] - 18;
       if (v > light[row + x]) light[row + x] = v;
     }
@@ -615,15 +738,39 @@ export function stepWeather(w: World): void {
     else if (roll < 0.34) kind = WEATHER.SNOW;
     else if (roll < 0.42) kind = WEATHER.STORM;
     w.weather.kind = kind;
+    if (kind !== WEATHER.CLEAR) {
+      w.journal.note(w.tick, 'погода', String(kind), `в мире впервые: ${WEATHER_NAME[kind]}`);
+    }
     w.weather.until = w.tick + 1800 + rng.nextInt(5400);
+    w.weather.cloudW = 70 + rng.nextInt(120);
+    w.weather.cloudX = rng.nextInt(g.w);
+    w.weather.wind = (rng.chance(0.5) ? 1 : -1) * (0.15 + rng.nextFloat() * 0.5);
   }
 
   const kind = w.weather.kind;
   if (kind === WEATHER.CLEAR) return;
 
-  const drops = kind === WEATHER.STORM ? 5 : 3;
+  // Воды в мире и так достаточно — дождь ждёт, пока она вернётся в небо.
+  if (w.waterCells > w.cfg.maxWaterCells) return;
+
+  // Дождь идёт из тучи, а не по всему миру сразу. Это и честнее, и в разы
+  // дешевле: сплошной ливень держал бодрствующими 205 чанков из 512.
+  w.weather.cloudX += w.weather.wind;
+  if (w.weather.cloudX < -w.weather.cloudW) {
+    w.weather.cloudX = g.w + w.weather.cloudW;
+    w.weather.wind = 0.15 + rng.nextFloat() * 0.5;
+  }
+  if (w.weather.cloudX > g.w + w.weather.cloudW) {
+    w.weather.cloudX = -w.weather.cloudW;
+    w.weather.wind = -(0.15 + rng.nextFloat() * 0.5);
+  }
+
+  const drops = kind === WEATHER.STORM ? 4 : 2;
+  const x0 = Math.max(0, Math.round(w.weather.cloudX - w.weather.cloudW / 2));
+  const x1 = Math.min(g.w - 1, Math.round(w.weather.cloudX + w.weather.cloudW / 2));
+
   for (let k = 0; k < drops; k++) {
-    const x = rng.nextInt(g.w);
+    const x = x0 + rng.nextInt(Math.max(1, x1 - x0));
     const cold = w.ambientAt(x, 0) <= 1;
     const mat = kind === WEATHER.SNOW ? MAT.SNOW : cold ? MAT.SNOW : MAT.WATER;
     const y = rng.nextInt(3);

@@ -20,10 +20,14 @@ import {
 } from '../../core/src/snapshot.ts';
 import { CHUNK, Grid } from './grid.ts';
 import { Fauna } from './fauna.ts';
+import { Journal } from './journal.ts';
+import { Creature } from '../../body/src/creature.ts';
 import { MAT, MATERIALS, MATERIAL_COUNT } from './materials.ts';
 import { WEATHER, computeSkyLight, stepWorld } from './sim.ts';
 
 export interface WorldConfig {
+  /** Куда дописывать летопись открытий (null — никуда). */
+  journalFile?: string | null;
   width: number;
   height: number;
   seed: number;
@@ -33,6 +37,8 @@ export interface WorldConfig {
   /** Длина суток в тиках. 4800 тиков — это 80 секунд при 60 Гц. */
   dayLengthTicks: number;
   weather: boolean;
+  /** Предел воды в мире: выше него дождь не идёт, иначе мир тонет. */
+  maxWaterCells: number;
 }
 
 export interface WorldStats {
@@ -68,13 +74,31 @@ export class World {
 
   /** Живность: организмы, живущие по алгоритмам. */
   readonly fauna = new Fauna();
+  /** Карта открытого неба: 1 — над клеткой нет породы. */
+  readonly skyOpen: Uint8Array;
+
+  /** Летопись первых событий мира. */
+  readonly journal: Journal;
+  /**
+   * Существо. Живёт в мире как его часть, но воскрешать его мир не умеет:
+   * это делает только сервер, снаружи (инвариант И7).
+   */
+  creature: Creature | null = null;
 
   tick = 0;
   /** Всё остыло до своей температуры среды — тепловой проход можно не считать. */
   thermalIdle = true;
   /** Текущий небесный свет, 0..255. */
   skyLight = 255;
-  weather: { kind: number; until: number } = { kind: WEATHER.CLEAR, until: 0 };
+  /** Сколько в мире воды (вода, лёд, снег, пар). Считается в медленном проходе. */
+  waterCells = 0;
+  weather: { kind: number; until: number; cloudX: number; cloudW: number; wind: number } = {
+    kind: WEATHER.CLEAR,
+    until: 0,
+    cloudX: 0,
+    cloudW: 110,
+    wind: 0.4,
+  };
 
   /**
    * Чанки, в которых есть отклонение от температуры среды. Тепловой проход
@@ -93,9 +117,12 @@ export class World {
     this.changedBuf = new Int32Array(this.grid.chunkCount);
     this.ambient = new Int16Array(cfg.width * cfg.height);
     this.ambient.fill(cfg.ambient);
+    this.journal = new Journal(400, cfg.journalFile ?? null);
+    this.skyOpen = new Uint8Array(cfg.width * cfg.height);
     this.hotChunks = new Uint8Array(this.grid.chunkCount);
     this.hotChunksNext = new Uint8Array(this.grid.chunkCount);
     this.skyLight = computeSkyLight(0, cfg.dayLengthTicks);
+    this.waterCells = 0;
   }
 
   /** Отметить, что в клетке (или рядом) есть тепло, требующее пересчёта. */
@@ -181,6 +208,56 @@ export class World {
     return touched;
   }
 
+  /**
+   * Найти место для рождения: трава, воздух над ней и — если попросят —
+   * вода неподалёку.
+   *
+   * Вода важна: луг без воды в пределах досягаемости означает верную
+   * смерть от жажды, сколько ни учи существо искать. Раньше оно рождалось
+   * на сухом лугу и погибало, не дойдя до озера.
+   */
+  findSurfaceSpot(
+    fromX = Math.floor(this.grid.w * 0.4),
+    opts: { nearWater?: number } = {},
+  ): { x: number; y: number } {
+    const g = this.grid;
+    const nearWater = opts.nearWater ?? 0;
+    let fallback: { x: number; y: number } | null = null;
+
+    for (let step = 0; step < g.w; step++) {
+      for (const x of [fromX + step, fromX - step]) {
+        if (x < 2 || x >= g.w - 2) continue;
+        for (let y = 4; y < g.h - 6; y++) {
+          const i = y * g.w + x;
+          if (g.mat[i] !== MAT.GRASS) continue;
+          if (g.mat[i - g.w] !== MAT.AIR) continue;
+          const spot = { x, y: y - 4 };
+          if (nearWater <= 0) return spot;
+          if (fallback === null) fallback = spot;
+          if (this.waterWithin(x, y, nearWater)) return spot;
+        }
+      }
+    }
+    return fallback ?? { x: Math.floor(g.w / 2), y: 8 };
+  }
+
+  /** Есть ли вода в пределах указанного расстояния. */
+  waterWithin(x: number, y: number, radius: number): boolean {
+    const g = this.grid;
+    const x0 = Math.max(0, x - radius);
+    const x1 = Math.min(g.w - 1, x + radius);
+    const y0 = Math.max(0, y - 12);
+    const y1 = Math.min(g.h - 1, y + 12);
+    for (let yy = y0; yy <= y1; yy++) {
+      const row = yy * g.w;
+      for (let xx = x0; xx <= x1; xx++) {
+        if (g.mat[row + xx] !== MAT.WATER) continue;
+        if (Math.abs(xx - x) + Math.abs(yy - y) <= radius) return true;
+      }
+    }
+    return false;
+  }
+
   /** Изменившиеся с прошлого вызова чанки. Возвращает срез буфера. */
   takeChanged(): Int32Array {
     const n = this.grid.takeChanged(this.changedBuf);
@@ -262,10 +339,15 @@ export class World {
         lightEveryTicks: this.cfg.lightEveryTicks,
         dayLengthTicks: this.cfg.dayLengthTicks,
         weather: this.cfg.weather,
+        maxWaterCells: this.cfg.maxWaterCells,
         weatherKind: this.weather.kind,
         weatherUntil: this.weather.until,
+        cloudX: this.weather.cloudX,
+        cloudW: this.weather.cloudW,
+        wind: this.weather.wind,
         thermalIdle: this.thermalIdle,
         skyLight: this.skyLight,
+        waterCells: this.waterCells,
         materialCount: MATERIAL_COUNT,
       },
       sections: [
@@ -278,6 +360,11 @@ export class World {
         { id: SEC.RNG, data: u32Bytes(this.rng.state()) },
         { id: SEC.DIRTY, data: g.dirtyNextBytes() },
         { id: SEC.FAUNA, data: this.fauna.toBytes() },
+        { id: SEC.HOT, data: this.hotChunks },
+        ...(this.creature ? [{ id: SEC.CREATURE, data: this.creature.toBytes() }] : []),
+        // Карта неба — часть состояния: от неё зависит, испаряется ли
+        // подземная вода, и без неё загруженный мир расходится с живым.
+        { id: SEC.SKY, data: this.skyOpen },
       ],
     });
   }
@@ -300,14 +387,19 @@ export class World {
       lightEveryTicks: numMeta(snap.meta.lightEveryTicks, 4),
       dayLengthTicks: numMeta(snap.meta.dayLengthTicks, 4800),
       weather: snap.meta.weather === true,
+      maxWaterCells: numMeta(snap.meta.maxWaterCells, 4500),
     };
     const w = new World(cfg);
     w.tick = snap.tick;
     w.thermalIdle = snap.meta.thermalIdle === true;
     w.skyLight = numMeta(snap.meta.skyLight, 255);
+    w.waterCells = numMeta(snap.meta.waterCells, 0);
     w.weather = {
       kind: numMeta(snap.meta.weatherKind, WEATHER.CLEAR),
       until: numMeta(snap.meta.weatherUntil, 0),
+      cloudX: numMeta(snap.meta.cloudX, 0),
+      cloudW: numMeta(snap.meta.cloudW, 110),
+      wind: numMeta(snap.meta.wind, 0.4),
     };
 
     const g = w.grid;
@@ -340,14 +432,19 @@ export class World {
         case SEC.FAUNA:
           w.fauna.fromBytes(section.data);
           break;
+        case SEC.HOT:
+          w.hotChunks.set(section.data.subarray(0, w.hotChunks.length));
+          break;
+        case SEC.CREATURE:
+          w.creature = Creature.fromBytes(section.data);
+          break;
+        case SEC.SKY:
+          w.skyOpen.set(section.data.subarray(0, w.skyOpen.length));
+          break;
         default:
           break;
       }
     }
-
-    // После загрузки неизвестно, какие чанки были горячими: если мир не
-    // в тепловом покое, честнее один раз пересчитать всё.
-    if (!w.thermalIdle) w.hotChunks.fill(1);
 
     // Намеренно НЕ помечаем весь мир грязным: набор грязных чанков — часть
     // состояния (см. Grid.dirtyNextBytes), иначе продолжение после загрузки

@@ -32,6 +32,7 @@ export function plantNeedsTime(w: World, i: number, m: number): boolean {
 
   switch (m) {
     case MAT.SAPLING:
+      return true;
     case MAT.LEAVES:
       return true;
     case MAT.GRASS:
@@ -41,7 +42,6 @@ export function plantNeedsTime(w: World, i: number, m: number): boolean {
       if (g.light[i] < 6) return false;
       return canSpreadToSoil(w, x, y);
     case MAT.MUSHROOM:
-      // Грибница тянется только в темноте.
       return g.light[i] < 90 && hasNeighborSoil(w, x, y);
     case MAT.ALGAE:
       // Водоросли живут только в воде: без неё они высыхают.

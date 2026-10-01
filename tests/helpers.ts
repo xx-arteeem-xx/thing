@@ -15,6 +15,8 @@ export const TEST_CFG: WorldConfig = {
   heatEveryTicks: 4,
   lightEveryTicks: 4,
   dayLengthTicks: 4800,
+  maxWaterCells: 4500,
+  journalFile: null,
   weather: false,
 };
 

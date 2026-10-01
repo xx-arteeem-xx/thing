@@ -19,6 +19,7 @@ export interface Config {
     lightEveryTicks: number;
     dayLengthTicks: number;
     weather: boolean;
+    maxWaterCells: number;
     tickHz: number;
   };
   server: {
@@ -33,6 +34,9 @@ export interface Config {
   snapshot: {
     dir: string;
     intervalSec: number;
+  };
+  journal: {
+    file: string;
   };
 }
 

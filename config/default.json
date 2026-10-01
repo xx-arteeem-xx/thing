@@ -5,9 +5,10 @@
     "seed": 20251001,
     "ambient": 20,
     "heatEveryTicks": 4,
-    "lightEveryTicks": 8,
+    "lightEveryTicks": 16,
     "dayLengthTicks": 4800,
     "weather": true,
+    "maxWaterCells": 4500,
     "tickHz": 60
   },
   "server": {
@@ -17,7 +18,10 @@
     "maxTicksPerFrame": 4
   },
   "debug": {
-    "tools": true
+    "tools": false
+  },
+  "journal": {
+    "file": "data/journal.jsonl"
   },
   "snapshot": {
     "dir": "data/snapshots",
